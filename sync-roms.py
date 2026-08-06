@@ -48,6 +48,9 @@ class CopyTask:
     source: pathlib.Path
     destination: pathlib.Path
 
+    def __str__(self):
+        return f"Copying {self.source.name} -> {self.destination.parent}"
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -218,7 +221,7 @@ def sync_roms(source_path: pathlib.Path,
             total=len(to_copy),
             desc="Overall Progress",
             unit='file',
-            position=threads,
+            position=2*threads,
             dynamic_ncols=True,
             leave=True
         ) as total_progress:
@@ -256,12 +259,13 @@ def copy_file_with_progress(task: CopyTask,
     try:
         file_size = task.source.stat().st_size
 
-        with tqdm(total=file_size,
+        with tqdm(total=0, bar_format=f"{task}", dynamic_ncols=True, position=2*position, leave=False) as top_line, \
+             tqdm(total=file_size,
                   unit='B',
                   unit_scale=True,
                   unit_divisor=1024,
-                  desc=f"{task.source.name[:21]}",
-                  position=position,
+                  desc=f"-> Progress",
+                  position=(2*position)+1,
                   dynamic_ncols=True,
                   leave=False) as pbar:
             try:
