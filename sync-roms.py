@@ -17,6 +17,14 @@ class Type(StrEnum):
     PATCH = "patch"
 
 
+class CopyReason(StrEnum):
+    NONE = "none"
+    OVERWRITE = "overwrite enabled"
+    DOES_NOT_EXIST = "dest doesn't exist"
+    SIZE_MISMATCH = "src and dest sizes don't match"
+    SOURCE_MODIFIED = "src more recently modified"
+
+
 @dataclass
 class RomFolder(YAMLWizard):
     path: str
@@ -46,6 +54,8 @@ class IncludeMapping:
 @dataclass
 class CopyTask:
     source: pathlib.Path
+    source_size: int
+    source_modified_time: int
     destination: pathlib.Path
 
     def __str__(self):
@@ -185,8 +195,11 @@ def sync_roms(source_path: pathlib.Path,
                 continue
 
             if is_interested_rom(file, mapping):
-                source_files.append(
-                    CopyTask(source=file, destination=mapping.destination / file.name))
+                stat_result = file.stat()
+                source_files.append(CopyTask(source=file,
+                                             source_size=stat_result.st_size,
+                                             source_modified_time=stat_result.st_mtime,
+                                             destination=mapping.destination / file.name))
 
     to_delete = set()
     # if the sync delete flag was specified, find all files in the destination directories that do not exist
@@ -206,28 +219,39 @@ def sync_roms(source_path: pathlib.Path,
                     to_delete.add(file.resolve())
 
     # filter out existing files unless the overwrite flag was set
-    to_copy = [
-        task for task in source_files if overwrite or not task.destination.exists()]
+    to_copy = [task for task in source_files if should_copy(task, overwrite)]
 
     if dry_run:
         for task in to_copy:
-            print (f"DRY RUN: Copying {task.source} -> {task.destination}")
+            reason = get_copy_reason(task, overwrite)
+            print (f"DRY RUN: Copying {task.source} -> {task.destination}: {reason}")
     elif len(to_copy) > 0:
         row_pool = Queue()
         for i in range(threads):
             row_pool.put(i)
 
+        total_size = sum(task.source_size for task in to_copy)
+
         with tqdm(
             total=len(to_copy),
-            desc="Overall Progress",
+            desc="File Progress",
             unit='file',
             position=2*threads,
             dynamic_ncols=True,
-            leave=True
-        ) as total_progress:
+            leave=False
+        ) as file_progress, tqdm(
+            total=total_size,
+            desc="Bytes Progress",
+            unit='B',
+            unit_scale=True,
+            unit_divisor=1024,
+            position=(2*threads)+1,
+            dynamic_ncols=True,
+            leave=False
+        ) as bytes_progress:
             with ThreadPoolExecutor(max_workers=threads) as executor:
                 futures = [
-                    executor.submit(copy_file_with_progress, task, row_pool, total_progress) 
+                    executor.submit(copy_file_with_progress, task, row_pool, file_progress, bytes_progress) 
                     for task in to_copy
                 ]
 
@@ -249,18 +273,35 @@ def is_interested_rom(file: pathlib.Path, mapping: IncludeMapping) -> bool:
 
     return False
 
+def should_copy(task: CopyTask, overwrite: bool) -> bool:
+    return get_copy_reason(task, overwrite) != CopyReason.NONE
+
+def get_copy_reason(task: CopyTask, overwrite: bool) -> CopyReason:
+    if not task.destination.exists():
+        return CopyReason.DOES_NOT_EXIST
+    
+    if overwrite:
+        return CopyReason.OVERWRITE
+
+    stat_result = task.destination.stat()
+    if stat_result.st_size != task.source_size:
+        return CopyReason.SIZE_MISMATCH
+
+    if stat_result.st_mtime < task.source_modified_time:
+        return CopyReason.SOURCE_MODIFIED
+
+    return CopyReason.NONE
 
 def copy_file_with_progress(task: CopyTask,
                             row_pool: Queue,
-                            total_progress: tqdm,
+                            file_progress: tqdm,
+                            bytes_progress: tqdm,
                             chunk_size: int = 1024*1024):
     position = row_pool.get()
 
     try:
-        file_size = task.source.stat().st_size
-
         with tqdm(total=0, bar_format=f"{task}", dynamic_ncols=True, position=2*position, leave=False) as top_line, \
-             tqdm(total=file_size,
+             tqdm(total=task.source_size,
                   unit='B',
                   unit_scale=True,
                   unit_divisor=1024,
@@ -277,11 +318,12 @@ def copy_file_with_progress(task: CopyTask,
                             break
                         fdest.write(chunk)
                         pbar.update(len(chunk))
+                        bytes_progress.update(len(chunk))
             except Exception as e:
                 tqdm.write(f"Error: Failed to copy {task.source} ro {task.destination}: {e}")
     finally:
         row_pool.put(position)
-        total_progress.update(1)
+        file_progress.update(1)
 
 
 if __name__ == "__main__":
