@@ -55,7 +55,7 @@ class IncludeMapping:
 class CopyTask:
     source: pathlib.Path
     source_size: int
-    source_modified_time: int
+    source_modified_time: float
     destination: pathlib.Path
 
     def __str__(self):
@@ -122,7 +122,13 @@ def main():
         print(f"Error: Source and destination paths can not be the same.", file=sys.stderr)
         sys.exit(1)
 
-    metadata = Metadata.from_yaml_file(metadata_file)
+    metadata_result = Metadata.from_yaml_file(metadata_file)
+    if isinstance(metadata_result, list):
+        print(
+            f"Error: Metadata file '{metadata_file}' must contain a single metadata object.", file=sys.stderr)
+        sys.exit(1)
+
+    metadata: Metadata = metadata_result
 
     include_mapping = None
     if args.named_set:
