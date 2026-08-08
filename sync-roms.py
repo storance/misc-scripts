@@ -7,6 +7,7 @@ import os
 import unicodedata
 import shutil
 import humanfriendly
+import re
 from queue import Queue
 from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
@@ -27,6 +28,7 @@ class RomFolder(YAMLWizard):
     path: str
     name: str
     extension: list[str]
+    collections: dict[str, list[str]] | None = None
 
 
 @dataclass
@@ -35,6 +37,7 @@ class NamedSetInclude(YAMLWizard):
     destination: str | None = None
     includes: list[str] | None = None
     excludes: list[str] | None = None
+    folder_per_game: bool = False
 
 
 @dataclass
@@ -54,14 +57,20 @@ class RomIncludeConfig:
     destination: pathlib.Path
     includes: list[str]
     excludes: list[str]
+    folder_per_game: bool
 
 @dataclass
 class IncludeConfig:
     delete_exclude: list[str]
     include_roms: list[RomIncludeConfig]
 
-    def add_include(self, rom_folder: RomFolder, destination: pathlib.Path, includes=[], excludes=[]):
-        self.include_roms.append(RomIncludeConfig(rom_folder, destination, includes, excludes))
+    def add_include(self,
+                    rom_folder: RomFolder,
+                    destination: pathlib.Path,
+                    includes=[],
+                    excludes=[],
+                    folder_per_game=False):
+        self.include_roms.append(RomIncludeConfig(rom_folder, destination, includes, excludes, folder_per_game))
 
 @dataclass
 class CopyTask:
@@ -172,7 +181,7 @@ def main():
                     rom_folder, dest_path, ns_include.destination)
                 includes = [normalize_unicode(include) for include in ns_include.includes or []]
                 excludes = [normalize_unicode(exclude) for exclude in ns_include.excludes or []]
-                include_config.add_include(rom_folder, destination, includes, excludes)
+                include_config.add_include(rom_folder, destination, includes, excludes, ns_include.folder_per_game)
             except ValueError as e:
                 print(f"Error: {e}", file=sys.stderr)
                 sys.exit(1)
@@ -223,7 +232,7 @@ def sync_roms(source_path: pathlib.Path,
               dry_run: bool,
               force: bool):
     copy_tasks = scan_source_files(source_path, include_config.include_roms)
-    to_delete = scan_for_files_to_delete(include_config, copy_tasks, sync_delete)
+    (files_to_delete, dirs_to_delete) = scan_for_files_to_delete(include_config, copy_tasks, sync_delete)
 
     # filter out copy tasks where the destination file exists, is the same size,
     # and the source file was not modified since the destination was last copied.
@@ -233,7 +242,7 @@ def sync_roms(source_path: pathlib.Path,
     total_size = sum(task.source_size for task in to_copy)
     extra_space = total_size \
         - sum(task.dest_size for task in to_copy) \
-        - sum(file.stat().st_size for file in to_delete)
+        - sum(file.stat().st_size for file in files_to_delete)
 
     _, _, free = shutil.disk_usage(dest_path)
     if not force and extra_space > 0 and free < extra_space:
@@ -241,8 +250,11 @@ def sync_roms(source_path: pathlib.Path,
         sys.exit(1)
 
     if dry_run:
-        for file in sorted(to_delete):
+        for file in sorted(files_to_delete):
             print(f"DRY RUN: Deleting {file}")
+
+        for dir in sorted(dirs_to_delete):
+            print(f"DRY RUN: Deleting directory {dir} (if empty)")
         
         for task in sorted(to_copy, key=lambda task: task.source):
             reason = get_copy_reason(task, overwrite)
@@ -252,17 +264,30 @@ def sync_roms(source_path: pathlib.Path,
             print(f"DRY RUN: Operation will use {humanfriendly.format_size(extra_space, binary=True)} of additional storage")
         elif extra_space < 0:
             print(f"DRY RUN: Operation will free {humanfriendly.format_size(-extra_space, binary=True)} of additional storage")
-    elif len(to_copy) > 0:
+    else:
         row_pool = Queue()
         for i in range(threads):
             row_pool.put(i+1)
 
-        for file in to_delete:
+        for file in files_to_delete:
             print(f"Deleting {file}")
             try:
                 file.unlink()
             except Exception as e:
                 print(f"Error: Failed to delete {file}: {e}")
+
+        for dir in dirs_to_delete:
+            if any(dir.iterdir()):
+                continue
+
+            print(f"Deleting directory {dir}")
+            try:
+                dir.rmdir()
+            except Exception as e:
+                print(f"Error: Failed to delete directory {dir}: {e}")
+
+        if len(to_copy) == 0:
+            return
 
         with tqdm(
             total=len(to_copy),
@@ -304,44 +329,77 @@ def scan_source_files(source_path: pathlib.Path, include_roms: list[RomIncludeCo
 
             stat_result = file.stat()
 
-            dest = include.destination / file.name
+            if include.folder_per_game:
+                dest = include.destination / get_folder_name(include.rom_folder, normalized_file) / normalized_file.name
+            else:
+                dest = include.destination / normalized_file.name
+
             dest_stat = None
             if dest.exists():
                 dest_stat = dest.stat()
 
-            source_files.append(CopyTask(file,
+            source_files.append(CopyTask(normalized_file,
                                          stat_result,
                                          dest, 
                                          dest_stat))
 
     return source_files
 
-def scan_for_files_to_delete(include_config: IncludeConfig, copy_tasks: list[CopyTask], sync_delete: bool) -> set[pathlib.Path]:
+def scan_for_files_to_delete(include_config: IncludeConfig,
+                             copy_tasks: list[CopyTask],
+                             sync_delete: bool) -> tuple[set[pathlib.Path], set[pathlib.Path]]:
     if not sync_delete:
-        return set()
+        return (set(), set())
 
-    actual_dst_paths = set()
     expected_dst_paths = set(task.dest for task in copy_tasks if task.dest.exists())
-    unique_dests = set(mapping.destination for mapping in include_config.include_roms)
-    for scan_dir in unique_dests:
-        if not scan_dir.exists():
+    scanned_dests = set()
+    files_to_delete = set()
+    dirs_to_delete = set()
+
+    for include in include_config.include_roms:
+        if include.destination in scanned_dests:
             continue
 
-        for file in scan_dir.iterdir():
-            if not file.is_file():
-                continue
+        if not include.destination.exists():
+            continue
 
-            # ignore hidden files
-            if file.name.startswith('.'):
-                continue
+        nesting_level = 0
+        for root, dirnames, filenames in include.destination.walk():
 
-            normalized_file = normalize_path(file)
+            for name in filenames:
+                file = root / name
 
-            if any(normalized_file.match(exclude) for exclude in include_config.delete_exclude):
-                continue
-            actual_dst_paths.add(normalized_file)
+                if not file.is_file():
+                    continue
 
-    return actual_dst_paths - expected_dst_paths
+                # ignore hidden files
+                if file.name.startswith('.'):
+                    continue
+
+                normalized_file = normalize_path(file)
+
+                if any(normalized_file.match(exclude) for exclude in include_config.delete_exclude):
+                    continue
+
+                if normalized_file not in expected_dst_paths:
+                    files_to_delete.add(normalized_file)
+                    if nesting_level >= 1:
+                        dirs_to_delete.add(normalized_file.parent)
+
+            if not include.folder_per_game or nesting_level >= 1:
+                dirnames.clear()
+            elif include.folder_per_game and nesting_level == 0:
+                # find empty top-level directories
+                for dir in dirnames:
+                    dir_path = root / dir
+                    if not any(dir_path.iterdir()):
+                        dirs_to_delete.add(dir_path)
+
+            nesting_level += 1
+
+        scanned_dests.add(include.destination)
+
+    return (files_to_delete, dirs_to_delete)
 
 def is_interested_rom(file: pathlib.Path, rom_include_config: RomIncludeConfig) -> bool:
     for include in rom_include_config.includes:
@@ -357,6 +415,20 @@ def is_interested_rom(file: pathlib.Path, rom_include_config: RomIncludeConfig) 
             return True
 
     return False
+
+def get_folder_name(rom_folder: RomFolder, source_file: pathlib.Path) -> str:
+    if rom_folder.collections:
+        for collection, patterns in rom_folder.collections.items():
+            if any(source_file.match(pattern) for pattern in patterns):
+                return collection
+
+    no_ext = source_file.stem
+    first_paren = no_ext.find('(')
+    if first_paren == -1:
+        return no_ext
+    else:
+        return no_ext[:first_paren].strip()
+
 
 def should_copy(task: CopyTask, overwrite: bool) -> bool:
     return get_copy_reason(task, overwrite) != CopyReason.NONE
