@@ -3,7 +3,10 @@
 import argparse
 import pathlib
 import sys
+import os
 import unicodedata
+import shutil
+import humanfriendly
 from queue import Queue
 from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
@@ -63,12 +66,20 @@ class IncludeConfig:
 @dataclass
 class CopyTask:
     source: pathlib.Path
-    source_size: int
-    source_modified_time: float
-    destination: pathlib.Path
+    source_stat: os.stat_result
+    dest: pathlib.Path
+    dest_stat: os.stat_result | None
 
     def __str__(self):
-        return f"Copying {self.source.name} -> {self.destination.parent}"
+        return f"Copying {self.source.name} -> {self.dest.parent}"
+
+    @property
+    def source_size(self) -> int:
+        return self.source_stat.st_size
+
+    @property
+    def dest_size(self) -> int:
+        return 0 if self.dest_stat is None else self.dest_stat.st_size
 
 
 def main():
@@ -78,14 +89,17 @@ def main():
                         help="Use one of the predefined sets of rom folders to sync in the metadata file.")
     parser.add_argument('-o', '--overwrite',
                         action="store_true",
-                        help="Overwrite existing files at the destination")
+                        help="Force overwrite existing files at the destination")
     parser.add_argument('-t', '--threads',
                         default=5,
                         type=int,
                         help="Number of parallel copy threads to use")
     parser.add_argument("--dry-run",
                         action="store_true",
-                        help="Runs in dry run mode")
+                        help="Runs in dry run mode which will print out the actions that will be taken without performing them")
+    parser.add_argument("-f", "--force",
+                        action="store_true",
+                        help="Ignores the disk-space check and forces the copy to happen")
 
 
     delete_group = parser.add_argument_group("Delete Destination")
@@ -94,7 +108,7 @@ def main():
                             help="Delete files from the destination that are not in the source")
     delete_group.add_argument("-X", "--delete-exclude",
                               action="append",
-                              help="Glob patterns of files to exclude when deleting files that exist in the destination but not the source")
+                              help="Glob pattern to exclude when deleting files that exist in the destination but not the source")
 
     include_group = parser.add_argument_group("Include Roms")
     include_group.add_argument("-i", "--include",
@@ -111,27 +125,24 @@ def main():
     
 
     parser.add_argument("source",
-                        help="Source directory where the rom folders are located. Expect a metadata.yml file to exist in this directory.")
+                        help="Source directory where the rom folders are located. Expects a metadata.yml file to exist in this directory.")
     parser.add_argument("destination",
                         help="Destination directory where the roms will be synced to.")
     args = parser.parse_args()
 
     source_path = pathlib.Path(args.source)
     if not source_path.exists() or not source_path.is_dir():
-        print(
-            f"Error: Source path '{source_path}' does not exist or is not a directory.", file=sys.stderr)
+        print(f"Error: Source path '{source_path}' does not exist or is not a directory.", file=sys.stderr)
         sys.exit(1)
 
     metadata_file = source_path / "metadata.yml"
     if not metadata_file.exists():
-        print(
-            f"Error: Metadata file '{metadata_file}' does not exist in the source directory.", file=sys.stderr)
+        print(f"Error: Metadata file '{metadata_file}' does not exist in the source directory.", file=sys.stderr)
         sys.exit(1)
 
     dest_path = pathlib.Path(args.destination)
     if not dest_path.exists() or not dest_path.is_dir():
-        print(
-            f"Error: Destination path '{dest_path}' does not exist or is not a directory.", file=sys.stderr)
+        print(f"Error: Destination path '{dest_path}' does not exist or is not a directory.", file=sys.stderr)
         sys.exit(1)
 
     if source_path.samefile(dest_path):
@@ -177,8 +188,8 @@ def main():
                 rom_folder, dest_path, destination_mapping.get(rom_folder.name))
             include_config.add_include(rom_folder, destination)
 
-    sync_roms(source_path, include_config, args.threads,
-              args.overwrite, args.sync_delete, args.dry_run)
+    sync_roms(source_path, dest_path, include_config, args.threads,
+              args.overwrite, args.sync_delete, args.dry_run, args.force)
 
 
 def lookup_rom_folder(rom_folder_name: str, metadata: Metadata) -> RomFolder:
@@ -204,11 +215,13 @@ def normalize_unicode(text: str) -> str:
     return unicodedata.normalize('NFC', text)
 
 def sync_roms(source_path: pathlib.Path,
+              dest_path: pathlib.Path,
               include_config: IncludeConfig,
               threads: int,
               overwrite: bool,
               sync_delete: bool,
-              dry_run: bool):
+              dry_run: bool,
+              force: bool):
     copy_tasks = scan_source_files(source_path, include_config.include_roms)
     to_delete = scan_for_files_to_delete(include_config, copy_tasks, sync_delete)
 
@@ -217,16 +230,39 @@ def sync_roms(source_path: pathlib.Path,
     # The overwrite flag will override this behavior.
     to_copy = [task for task in copy_tasks if should_copy(task, overwrite)]
 
+    total_size = sum(task.source_size for task in to_copy)
+    extra_space = total_size \
+        - sum(task.dest_size for task in to_copy) \
+        - sum(file.stat().st_size for file in to_delete)
+
+    _, _, free = shutil.disk_usage(dest_path)
+    if not force and extra_space > 0 and free < extra_space:
+        print(f"Insufficient free space on destination path {dest_path}.  Free space {humanfriendly.format_size(free, binary=True)}, required space {humanfriendly.format_size(extra_space, binary=True)}")
+        sys.exit(1)
+
     if dry_run:
-        for task in to_copy:
+        for file in sorted(to_delete):
+            print(f"DRY RUN: Deleting {file}")
+        
+        for task in sorted(to_copy, key=lambda task: task.source):
             reason = get_copy_reason(task, overwrite)
             print (f"DRY RUN: {task}. Reason: {reason}")
+
+        if extra_space > 0:
+            print(f"DRY RUN: Operation will use {humanfriendly.format_size(extra_space, binary=True)} of additional storage")
+        elif extra_space < 0:
+            print(f"DRY RUN: Operation will free {humanfriendly.format_size(-extra_space, binary=True)} of additional storage")
     elif len(to_copy) > 0:
         row_pool = Queue()
         for i in range(threads):
             row_pool.put(i+1)
 
-        total_size = sum(task.source_size for task in to_copy)
+        for file in to_delete:
+            print(f"Deleting {file}")
+            try:
+                file.unlink()
+            except Exception as e:
+                print(f"Error: Failed to delete {file}: {e}")
 
         with tqdm(
             total=len(to_copy),
@@ -252,13 +288,6 @@ def sync_roms(source_path: pathlib.Path,
                 for future in futures:
                     future.result()
 
-    for file in to_delete:
-        if dry_run:
-            print(f"DRY RUN: Deleting {file}")
-        else:
-            tqdm.write(f"Deleting {file}")
-            file.unlink()
-
 
 def scan_source_files(source_path: pathlib.Path, include_roms: list[RomIncludeConfig]) -> list[CopyTask]:
     source_files = []
@@ -274,10 +303,16 @@ def scan_source_files(source_path: pathlib.Path, include_roms: list[RomIncludeCo
                 continue
 
             stat_result = file.stat()
-            source_files.append(CopyTask(source=file,
-                                         source_size=stat_result.st_size,
-                                         source_modified_time=stat_result.st_mtime,
-                                         destination=include.destination / file.name))
+
+            dest = include.destination / file.name
+            dest_stat = None
+            if dest.exists():
+                dest_stat = dest.stat()
+
+            source_files.append(CopyTask(file,
+                                         stat_result,
+                                         dest, 
+                                         dest_stat))
 
     return source_files
 
@@ -286,7 +321,7 @@ def scan_for_files_to_delete(include_config: IncludeConfig, copy_tasks: list[Cop
         return set()
 
     actual_dst_paths = set()
-    expected_dst_paths = set(task.destination for task in copy_tasks if task.destination.exists())
+    expected_dst_paths = set(task.dest for task in copy_tasks if task.dest.exists())
     unique_dests = set(mapping.destination for mapping in include_config.include_roms)
     for scan_dir in unique_dests:
         if not scan_dir.exists():
@@ -327,17 +362,16 @@ def should_copy(task: CopyTask, overwrite: bool) -> bool:
     return get_copy_reason(task, overwrite) != CopyReason.NONE
 
 def get_copy_reason(task: CopyTask, overwrite: bool) -> CopyReason:
-    if not task.destination.exists():
+    if task.dest_stat is None:
         return CopyReason.DOES_NOT_EXIST
     
     if overwrite:
         return CopyReason.OVERWRITE
 
-    stat_result = task.destination.stat()
-    if stat_result.st_size != task.source_size:
+    if task.dest_size != task.source_size:
         return CopyReason.SIZE_MISMATCH
 
-    if stat_result.st_mtime < task.source_modified_time:
+    if task.dest_stat.st_mtime < task.source_stat.st_mtime:
         return CopyReason.SOURCE_MODIFIED
 
     return CopyReason.NONE
@@ -360,8 +394,8 @@ def copy_file_with_progress(task: CopyTask,
                   dynamic_ncols=True,
                   leave=False) as pbar:
             try:
-                task.destination.parent.mkdir(parents=True, exist_ok=True)
-                with open(task.source, 'rb') as fsrc, open(task.destination, 'wb') as fdest:
+                task.dest.parent.mkdir(parents=True, exist_ok=True)
+                with open(task.source, 'rb') as fsrc, open(task.dest, 'wb') as fdest:
                     while True:
                         chunk = fsrc.read(chunk_size)
                         if not chunk:
@@ -370,7 +404,7 @@ def copy_file_with_progress(task: CopyTask,
                         pbar.update(len(chunk))
                         bytes_progress.update(len(chunk))
             except Exception as e:
-                tqdm.write(f"Error: Failed to copy {task.source.name} to {task.destination.parent}: {e}")
+                tqdm.write(f"Error: Failed to copy {task.source.name} to {task.dest.parent}: {e}")
     finally:
         row_pool.put(position)
         file_progress.update(1)
