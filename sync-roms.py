@@ -7,31 +7,38 @@ import os
 import unicodedata
 import shutil
 import humanfriendly
-import re
+from enum import StrEnum
 from queue import Queue
 from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
-from enum import StrEnum
 from dataclasses import dataclass, field
 from dataclass_wizard.mixins.yaml import YAMLWizard
 
-class CopyReason(StrEnum):
-    NONE = "none"
-    OVERWRITE = "overwrite enabled"
-    DOES_NOT_EXIST = "dest doesn't exist"
-    SIZE_MISMATCH = "src and dest sizes don't match"
-    SOURCE_MODIFIED = "src more recently modified"
+class DotFilesMode(StrEnum):
+    IGNORE = "ignore"
+    DELETE_FROM_DEST = "delete-from-dest"
+    COPY_FROM_SRC = "copy-from-src"
+    BOTH = "both"
+
+    def should_delete(self):
+        return self == DotFilesMode.BOTH or self == DotFilesMode.DELETE_FROM_DEST
+
+    def should_copy(self):
+        return self == DotFilesMode.BOTH or self == DotFilesMode.COPY_FROM_SRC
 
 @dataclass
 class Metadata(YAMLWizard):
     roms: list[RomFolder]
 
+
 @dataclass
 class RomFolder(YAMLWizard):
     path: str
     name: str
-    extensions: list[str]
+    includes: list[str]
+    excludes: list[str] = field(default_factory=list)
     collections: dict[str, list[str]] = field(default_factory=dict)
+
 
 @dataclass
 class RomSetConfig(YAMLWizard):
@@ -47,6 +54,7 @@ class IncludeConfig(YAMLWizard):
     includes: list[str] = field(default_factory=list)
     excludes: list[str] = field(default_factory=list)
     folder_per_game: bool = False
+
 
 @dataclass
 class ResolvedRomSetConfig:
@@ -114,6 +122,13 @@ class CopyTask:
     def dest_size(self) -> int:
         return 0 if self.dest_stat is None else self.dest_stat.st_size
 
+    def is_copy_required(self) -> bool:
+        if not self.dest.exists() or self.dest_stat is None:
+            return True
+
+        return self.dest_stat.st_size != self.source_stat.st_size \
+            or self.dest_stat.st_mtime < self.source_stat.st_mtime
+
 
 def main():
     parser = argparse.ArgumentParser(description='Sync ROMs between directories')
@@ -137,9 +152,12 @@ def main():
     parser.add_argument('-d', '--sync-delete',
                         action='store_true',
                         help="Delete files from the destination that are not in the source")
-    parser.add_argument('-H', '--delete-hidden',
-                        action='store_true',
-                        help="Also deletes files that start with a period (.) which are hidden files on nix platforms.")
+    parser.add_argument('-m', '--dot-files-mode',
+                        choices=list(DotFilesMode),
+                        metavar='MODE',
+                        type=DotFilesMode,
+                        default=DotFilesMode.IGNORE,
+                        help='Control how dot files are handles. Valid choices: %(choices)s). Default: ignore')
     parser.add_argument('source',
                         help='Source directory where the rom folders are located. ' +
                              'Expects a metadata.yml file to exist in this directory.')
@@ -166,40 +184,40 @@ def main():
         print(f"Error: Source and destination paths can not be the same.", file=sys.stderr)
         sys.exit(1)
 
-    metadata_result = Metadata.from_yaml_file(metadata_file)
-    if isinstance(metadata_result, list):
+    metadata = Metadata.from_yaml_file(metadata_file)
+    if isinstance(metadata, list):
         print(f"Error: Metadata file '{metadata_file}' must contain a single metadata object.", file=sys.stderr)
         sys.exit(1)
 
-    metadata: Metadata = metadata_result
-
-    if args.set_config:
-        set_config_path = source_path / pathlib.Path(args.set_config).with_suffix('.yml')
-        if not set_config_path.exists():
-            print(f"Error: Set config file {args.set_config} does not exist at {set_config_path}.", file=sys.stderr)
-            sys.exit(1)
-
-
-        set_config_result = RomSetConfig.from_yaml_file(set_config_path)
-        if isinstance(set_config_result, list):
-            print(f"Error: Set config file '{metadata_file}' must contain a single object.", file=sys.stderr)
-            sys.exit(1)
-        set_config: RomSetConfig = set_config_result
-
-        try:
-            resolved_set_config = ResolvedRomSetConfig.convert(set_config, dest_path, metadata)
-        except ValueError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            sys.exit(1)
-    else:
-        includes = []
-        for rom_folder in metadata.roms:
-            includes.append(ResolvedIncludeConfig(rom_folder, resolve_destination(rom_folder, dest_path, None, None)))
-        resolved_set_config = ResolvedRomSetConfig(includes)
+    try:
+        if args.set_config:
+            resolved_set_config = read_set_config(source_path, dest_path, metadata, args.set_config)
+        else:
+            includes = []
+            for rom_folder in metadata.roms:
+                includes.append(ResolvedIncludeConfig(rom_folder, resolve_destination(rom_folder, dest_path, None, None)))
+            resolved_set_config = ResolvedRomSetConfig(includes)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
     sync_roms(source_path, dest_path, resolved_set_config, args.parallel_copies,
-              args.overwrite, args.sync_delete, args.delete_hidden, args.dry_run, args.force)
+              args.overwrite, args.sync_delete, args.dot_files_mode, args.dry_run, args.force)
 
+
+def read_set_config(source_path: pathlib.Path,
+                    dest_path: pathlib.Path,
+                    metadata: Metadata,
+                    set_config_name: str) -> ResolvedRomSetConfig:
+    set_config_path = source_path / pathlib.Path(set_config_name).with_suffix('.yml')
+    if not set_config_path.exists():
+        raise ValueError(f"Set config file '{set_config_name}' does not exist at {set_config_path}")
+
+    set_config = RomSetConfig.from_yaml_file(set_config_path)
+    if isinstance(set_config, list):
+        raise ValueError(f"Error: Set config file '{set_config_path}' must contain a single object.")
+    
+    return ResolvedRomSetConfig.convert(set_config, dest_path, metadata)
 
 def resolve_destination(rom_folder: RomFolder,
                         dest_path: pathlib.Path,
@@ -207,23 +225,21 @@ def resolve_destination(rom_folder: RomFolder,
                         destination: str | None) -> pathlib.Path:
 
     if destination is None:
-        if root_folder is None or root_folder == '': 
-            return normalize_path(dest_path / rom_folder.path)
-        else:
-            return normalize_path(dest_path / root_folder / rom_folder.path)
-    elif destination in ['', '.']:
-        if root_folder is None or root_folder == '': 
-            return normalize_path(dest_path)
-        else:
-            return normalize_path(dest_path / root_folder)
+        resolved_path = join_dest_path(dest_path, root_folder, rom_folder.path)
+    elif destination.startswith('/'):
+        resolved_path = normalize_path(dest_path / destination[1:])
     else:
-        if destination.startswith('/'):
-            return normalize_path(dest_path / destination[1:])
-        elif root_folder is None or root_folder == '':
-            return normalize_path(dest_path / destination)
-        else:
-            return normalize_path(dest_path / root_folder / destination)
-        
+        resolved_path = join_dest_path(dest_path, root_folder, destination)
+
+    if not resolved_path.is_relative_to(dest_path):
+        raise ValueError(f"Destination path {resolved_path} is not a relative path to the destination folder")
+    return resolved_path
+
+def join_dest_path(dest_path: pathlib.Path, root_folder: str | None, relative_path: str) -> pathlib.Path:
+    if root_folder is None or root_folder == '':
+        return normalize_path(dest_path / relative_path)
+    else:
+        return normalize_path(dest_path / root_folder / relative_path)
 
 def normalize_path(path: pathlib.Path) -> pathlib.Path:
     return pathlib.Path(normalize_unicode(str(path))).resolve()
@@ -237,95 +253,34 @@ def sync_roms(source_path: pathlib.Path,
               threads: int,
               overwrite: bool,
               sync_delete: bool,
-              delete_hidden: bool,
+              dot_files_mode: DotFilesMode,
               dry_run: bool,
               force: bool):
-    copy_tasks = scan_source_files(source_path, rom_set_config.includes)
-    (files_to_delete, dirs_to_delete) = scan_for_files_to_delete(rom_set_config, copy_tasks, sync_delete, delete_hidden)
+    copy_tasks = scan_source_files(source_path, rom_set_config.includes, dot_files_mode)
+    (files_to_delete, dirs_to_delete) = scan_for_files_to_delete(rom_set_config, copy_tasks, sync_delete, dot_files_mode)
 
     # filter out copy tasks where the destination file exists, is the same size,
     # and the source file was not modified since the destination was last copied.
     # The overwrite flag will override this behavior.
-    to_copy = [task for task in copy_tasks if should_copy(task, overwrite)]
+    to_copy = [task for task in copy_tasks if overwrite or task.is_copy_required()]
 
     total_size = sum(task.source_size for task in to_copy)
     extra_space = total_size \
         - sum(task.dest_size for task in to_copy) \
         - sum(file.stat().st_size for file in files_to_delete)
 
-    _, _, free = shutil.disk_usage(dest_path)
-    if not force and extra_space > 0 and free < extra_space:
-        print(f"Insufficient free space on destination path {dest_path}.  " +
-               f"Free space {humanfriendly.format_size(free, binary=True)}, " +
-               f"required space {humanfriendly.format_size(extra_space, binary=True)}")
-        sys.exit(1)
+    if not force:
+        check_disk_space(dest_path, extra_space)
 
     if dry_run:
-        for file in sorted(files_to_delete):
-            print(f"DRY RUN: Deleting {file}")
-
-        for dir in sorted(dirs_to_delete):
-            print(f"DRY RUN: Deleting directory {dir} (if empty)")
-        
-        for task in sorted(to_copy, key=lambda task: task.source):
-            reason = get_copy_reason(task, overwrite)
-            print (f"DRY RUN: {task}. Reason: {reason}")
-
-        if extra_space > 0:
-            print(f"DRY RUN: Operation will use {humanfriendly.format_size(extra_space, binary=True)} of additional storage")
-        elif extra_space < 0:
-            print(f"DRY RUN: Operation will free {humanfriendly.format_size(-extra_space, binary=True)} of additional storage")
+        print_dry_run_summary(files_to_delete, dirs_to_delete, to_copy, extra_space)
     else:
-        row_pool = Queue()
-        for i in range(threads):
-            row_pool.put(i+1)
+        run_sync_delete(files_to_delete, dirs_to_delete)
+        run_copy_sync(to_copy, threads, total_size)
 
-        for file in files_to_delete:
-            print(f"Deleting {file}")
-            try:
-                file.unlink()
-            except Exception as e:
-                print(f"Error: Failed to delete {file}: {e}")
-
-        for dir in dirs_to_delete:
-            if any(dir.iterdir()):
-                continue
-
-            print(f"Deleting directory {dir}")
-            try:
-                dir.rmdir()
-            except Exception as e:
-                print(f"Error: Failed to delete directory {dir}: {e}")
-
-        if len(to_copy) == 0:
-            return
-
-        with tqdm(
-            total=len(to_copy),
-            desc="File Progress",
-            unit='file',
-            position=0,
-            dynamic_ncols=True
-        ) as file_progress, tqdm(
-            total=total_size,
-            desc="Bytes Progress",
-            unit='B',
-            unit_scale=True,
-            unit_divisor=1024,
-            position=1,
-            dynamic_ncols=True
-        ) as bytes_progress:
-            with ThreadPoolExecutor(max_workers=threads) as executor:
-                futures = [
-                    executor.submit(copy_file_with_progress, task, row_pool, file_progress, bytes_progress) 
-                    for task in to_copy
-                ]
-
-                for future in futures:
-                    future.result()
-
-
-def scan_source_files(source_path: pathlib.Path, include_roms: list[ResolvedIncludeConfig]) -> list[CopyTask]:
+def scan_source_files(source_path: pathlib.Path,
+                      include_roms: list[ResolvedIncludeConfig],
+                      dot_files_mode: DotFilesMode) -> list[CopyTask]:
     source_files = []
     for include in include_roms:
         scan_dir = source_path / include.rom_folder.path
@@ -334,6 +289,9 @@ def scan_source_files(source_path: pathlib.Path, include_roms: list[ResolvedIncl
             continue
 
         for file in scan_dir.iterdir():
+            if not dot_files_mode.should_copy() and file.name.startswith("."):
+                continue
+
             normalized_file = normalize_path(file)
             if not normalized_file.is_file() or not is_interested_rom(normalized_file, include):
                 continue
@@ -359,7 +317,7 @@ def scan_source_files(source_path: pathlib.Path, include_roms: list[ResolvedIncl
 def scan_for_files_to_delete(rom_set_config: ResolvedRomSetConfig,
                              copy_tasks: list[CopyTask],
                              sync_delete: bool,
-                             delete_hidden: bool) -> tuple[set[pathlib.Path], set[pathlib.Path]]:
+                             dot_files_mode: DotFilesMode) -> tuple[set[pathlib.Path], set[pathlib.Path]]:
     if not sync_delete:
         return (set(), set())
 
@@ -385,7 +343,7 @@ def scan_for_files_to_delete(rom_set_config: ResolvedRomSetConfig,
                     continue
 
                 # ignore hidden files
-                if not delete_hidden and file.name.startswith('.'):
+                if not dot_files_mode.should_delete() and file.name.startswith('.'):
                     continue
 
                 normalized_file = normalize_path(file)
@@ -414,8 +372,11 @@ def scan_for_files_to_delete(rom_set_config: ResolvedRomSetConfig,
     return (files_to_delete, dirs_to_delete)
 
 def is_interested_rom(file: pathlib.Path, include_config: ResolvedIncludeConfig) -> bool:
-    if not any(file.name.lower().endswith(ext.lower()) for ext in include_config.rom_folder.extensions):
+    if not any(file.match(include) for include in include_config.rom_folder.includes):
         return False
+
+    if any(file.match(exclude) for exclude in include_config.rom_folder.excludes):
+            return False
 
     if not all(not file.match(exclude) for exclude in include_config.excludes):
         return False
@@ -435,32 +396,111 @@ def get_folder_name(rom_folder: RomFolder, source_file: pathlib.Path) -> str:
     else:
         return no_ext[:first_paren].strip()
 
+def check_disk_space(dest_path: pathlib.Path, extra_space: int):
+    _, _, free = shutil.disk_usage(dest_path)
+    if extra_space > 0 and free < extra_space:
+        print(f"Insufficient free space on destination path {dest_path}.  " +
+                f"Free space {humanfriendly.format_size(free, binary=True)}, " +
+                f"required space {humanfriendly.format_size(extra_space, binary=True)}")
+        sys.exit(1)
 
-def should_copy(task: CopyTask, overwrite: bool) -> bool:
-    return get_copy_reason(task, overwrite) != CopyReason.NONE
+def print_dry_run_summary(files_to_delete: set[pathlib.Path],
+                          dirs_to_delete: set[pathlib.Path],
+                          files_to_copy: list[CopyTask],
+                          extra_space: int):
+    if not files_to_delete:
+        print ("DRY RUN: No files to delete.")
+    else:
+        for file in sorted(files_to_delete):
+            print(f"DRY RUN: Deleting {file}")
 
-def get_copy_reason(task: CopyTask, overwrite: bool) -> CopyReason:
-    if task.dest_stat is None:
-        return CopyReason.DOES_NOT_EXIST
-    
-    if overwrite:
-        return CopyReason.OVERWRITE
+    if not dirs_to_delete:
+        print ("DRY RUN: No directories to delete.")
+    else:
+        for dir in sorted(dirs_to_delete):
+            print(f"DRY RUN: Deleting directory {dir} (if empty)")
 
-    if task.dest_size != task.source_size:
-        return CopyReason.SIZE_MISMATCH
+    if not files_to_copy:
+        print ("DRY RUN: No files to copy.")
+    else:
+        for task in sorted(files_to_copy, key=lambda task: task.source):
+            print (f"DRY RUN: {task}.")
 
-    if task.dest_stat.st_mtime < task.source_stat.st_mtime:
-        return CopyReason.SOURCE_MODIFIED
+    if extra_space > 0:
+        print(f"DRY RUN: Operation will use {humanfriendly.format_size(extra_space, binary=True)} of storage.")
+    elif extra_space < 0:
+        print(f"DRY RUN: Operation will free {humanfriendly.format_size(-extra_space, binary=True)} of storage.")
 
-    return CopyReason.NONE
+def run_sync_delete(files_to_delete: set[pathlib.Path], dirs_to_delete: set[pathlib.Path]):
+    for file in files_to_delete:
+        print(f"Deleting {file}")
+        try:
+            file.unlink()
+        except Exception as e:
+            print(f"Error: Failed to delete {file}: {e}")
 
-def copy_file_with_progress(task: CopyTask,
+    for dir in dirs_to_delete:
+        if any(dir.iterdir()):
+            continue
+
+        print(f"Deleting directory {dir}")
+        try:
+            dir.rmdir()
+        except Exception as e:
+            print(f"Error: Failed to delete directory {dir}: {e}")
+
+def run_copy_sync(copy_tasks: list[CopyTask], threads: int, total_size: int):
+    if len(copy_tasks) == 0:
+        return
+
+    with tqdm(
+        total=len(copy_tasks),
+        desc="File Progress",
+        unit='file',
+        position=0,
+        dynamic_ncols=True
+    ) as file_progress, tqdm(
+        total=total_size,
+        desc="Bytes Progress",
+        unit='B',
+        unit_scale=True,
+        unit_divisor=1024,
+        position=1,
+        dynamic_ncols=True
+    ) as bytes_progress:
+        if threads == 1:
+            for task in copy_tasks:
+                copy_file_with_progress(task, 1, file_progress, bytes_progress)
+        else:
+            row_pool = Queue()
+            for i in range(threads):
+                row_pool.put(i+1)
+            
+            with ThreadPoolExecutor(max_workers=threads) as executor:
+                futures = [
+                    executor.submit(copy_file_with_progress_thread, task, row_pool, file_progress, bytes_progress) 
+                    for task in copy_tasks
+                ]
+
+                for future in futures:
+                    future.result()
+
+def copy_file_with_progress_thread(task: CopyTask,
                             row_pool: Queue,
                             file_progress: tqdm,
                             bytes_progress: tqdm,
                             chunk_size: int = 1024*1024):
     position = row_pool.get()
+    try:
+        copy_file_with_progress(task, position, file_progress, bytes_progress, chunk_size)
+    finally:
+        row_pool.put(position)
 
+def copy_file_with_progress(task: CopyTask,
+                            position: int,
+                            file_progress: tqdm,
+                            bytes_progress: tqdm,
+                            chunk_size: int = 1024*1024):
     try:
         with tqdm(total=0, bar_format=f"{task}", dynamic_ncols=True, position=2*position, leave=False) as top_line, \
              tqdm(total=task.source_size,
@@ -484,7 +524,6 @@ def copy_file_with_progress(task: CopyTask,
             except Exception as e:
                 tqdm.write(f"Error: Failed to copy {task.source.name} to {task.dest.parent}: {e}")
     finally:
-        row_pool.put(position)
         file_progress.update(1)
 
 
