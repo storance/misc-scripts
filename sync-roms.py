@@ -12,7 +12,7 @@ from queue import Queue
 from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
 from enum import StrEnum
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from dataclass_wizard.mixins.yaml import YAMLWizard
 
 class CopyReason(StrEnum):
@@ -22,55 +22,79 @@ class CopyReason(StrEnum):
     SIZE_MISMATCH = "src and dest sizes don't match"
     SOURCE_MODIFIED = "src more recently modified"
 
+@dataclass
+class Metadata(YAMLWizard):
+    roms: list[RomFolder]
 
 @dataclass
 class RomFolder(YAMLWizard):
     path: str
     name: str
-    extension: list[str]
-    collections: dict[str, list[str]] | None = None
+    extensions: list[str]
+    collections: dict[str, list[str]] = field(default_factory=dict)
+
+@dataclass
+class RomSetConfig(YAMLWizard):
+    includes: list[IncludeConfig]
+    root_folder: str | None = None
+    delete_excludes: list[str] = field(default_factory=list)
 
 
 @dataclass
-class NamedSetInclude(YAMLWizard):
+class IncludeConfig(YAMLWizard):
     name: str
     destination: str | None = None
-    includes: list[str] | None = None
-    excludes: list[str] | None = None
+    includes: list[str] = field(default_factory=list)
+    excludes: list[str] = field(default_factory=list)
     folder_per_game: bool = False
 
+@dataclass
+class ResolvedRomSetConfig:
+    includes: list[ResolvedIncludeConfig]
+    delete_excludes: list[str] = field(default_factory=list)
+
+    @staticmethod
+    def convert(set_config: RomSetConfig, dest_path: pathlib.Path, metadata: Metadata) -> ResolvedRomSetConfig:
+        delete_excludes = [normalize_unicode(exclude) for exclude in set_config.delete_excludes]
+        includes = []
+        for include_config in set_config.includes:
+            rom_folder = lookup_rom_folder(include_config.name, metadata)
+            includes.append(ResolvedIncludeConfig.convert(include_config, dest_path, set_config.root_folder, rom_folder))
+
+        return ResolvedRomSetConfig(includes, delete_excludes)
+
+def lookup_rom_folder(rom_folder_name: str, metadata: Metadata) -> RomFolder:
+    for rom_folder in metadata.roms:
+        if rom_folder.name == rom_folder_name:
+            return rom_folder
+
+    raise ValueError(f"The rom folder '{rom_folder_name}' was not found in the metadata.yml.")
+
 
 @dataclass
-class NamedSet(YAMLWizard):
-    includes: list[NamedSetInclude]
-    delete_excludes: list[str] | None = None
-
-@dataclass
-class Metadata(YAMLWizard):
-    roms: list[RomFolder]
-    named_sets: dict[str, NamedSet]
-
-
-@dataclass
-class RomIncludeConfig:
+class ResolvedIncludeConfig:
     rom_folder: RomFolder
     destination: pathlib.Path
-    includes: list[str]
-    excludes: list[str]
-    folder_per_game: bool
+    includes: list[str] = field(default_factory=list)
+    excludes: list[str] = field(default_factory=list)
+    folder_per_game: bool = False
 
-@dataclass
-class IncludeConfig:
-    delete_exclude: list[str]
-    include_roms: list[RomIncludeConfig]
+    @staticmethod
+    def convert(include_config: IncludeConfig,
+                dest_path: pathlib.Path,
+                root_folder: str | None,
+                rom_folder: RomFolder) -> ResolvedIncludeConfig:
+        destination = resolve_destination(rom_folder, dest_path, root_folder, include_config.destination)
+        includes = [normalize_unicode(include) for include in include_config.includes]
+        excludes = [normalize_unicode(exclude) for exclude in include_config.excludes]
 
-    def add_include(self,
-                    rom_folder: RomFolder,
-                    destination: pathlib.Path,
-                    includes=[],
-                    excludes=[],
-                    folder_per_game=False):
-        self.include_roms.append(RomIncludeConfig(rom_folder, destination, includes, excludes, folder_per_game))
+        return ResolvedIncludeConfig(
+            rom_folder=rom_folder,
+            destination=destination,
+            includes=includes,
+            excludes=excludes,
+            folder_per_game=include_config.folder_per_game
+        )
 
 @dataclass
 class CopyTask:
@@ -92,51 +116,35 @@ class CopyTask:
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Sync ROMs between directories")
-    parser.add_argument("-s", "--named-set",
-                        help="Use one of the predefined sets of rom folders to sync in the metadata file.")
+    parser = argparse.ArgumentParser(description='Sync ROMs between directories')
+    parser.add_argument('-s', '--set-config',
+                        help='Use a predefined set configuration.  By default, looks in the destination ' +
+                             'folder for a file named this with a .yaml extension.')
     parser.add_argument('-o', '--overwrite',
-                        action="store_true",
-                        help="Force overwrite existing files at the destination")
-    parser.add_argument('-t', '--threads',
+                        action='store_true',
+                        help='Force overwrite existing files at the destination.')
+    parser.add_argument('-p', '--parallel-copies',
                         default=5,
                         type=int,
-                        help="Number of parallel copy threads to use")
-    parser.add_argument("--dry-run",
-                        action="store_true",
-                        help="Runs in dry run mode which will print out the actions that will be taken without performing them")
-    parser.add_argument("-f", "--force",
-                        action="store_true",
+                        help='Number file copies to perform in parallel.')
+    parser.add_argument('-D', '--dry-run',
+                        action='store_true',
+                        help='Runs in dry run mode. No copies or deletes will take place and a summary of ' + 
+                             'the planned actions will be printed.')
+    parser.add_argument('-f', '--force',
+                        action='store_true',
                         help="Ignores the disk-space check and forces the copy to happen")
-
-
-    delete_group = parser.add_argument_group("Delete Destination")
-    parser.add_argument("-d", "--sync-delete",
-                            action="store_true",
-                            help="Delete files from the destination that are not in the source")
-    delete_group.add_argument("-X", "--delete-exclude",
-                              action="append",
-                              help="Glob pattern to exclude when deleting files that exist in the destination but not the source")
-
-    include_group = parser.add_argument_group("Include Roms")
-    include_group.add_argument("-i", "--include",
-                               action="append",
-                               help="Include only specified rom folders (by name).")
-    include_group.add_argument("-e", "--exclude",
-                               action="append",
-                               help="Exclude specified rom folders (by name).")
-    include_group.add_argument("-m", "--destination-mapping",
-                               nargs=2,
-                               metavar=("NAME", "DESTINATION"),
-                               action="append",
-                               help="Maps a rom folder to a different destination folder name.")
-    
-
-    parser.add_argument("source",
-                        help="Source directory where the rom folders are located. Expects a metadata.yml file to exist in this directory.")
-    parser.add_argument("destination",
-                        help="Destination directory where the roms will be synced to.")
+    parser.add_argument('-d', '--sync-delete',
+                        action='store_true',
+                        help="Delete files from the destination that are not in the source")
+    parser.add_argument('-H', '--delete-hidden',
+                        action='store_true',
+                        help="Also deletes files that start with a period (.) which are hidden files on nix platforms.")
+    parser.add_argument('source',
+                        help='Source directory where the rom folders are located. ' +
+                             'Expects a metadata.yml file to exist in this directory.')
+    parser.add_argument('destination',
+                        help='Destination directory where the roms will be synced to.')
     args = parser.parse_args()
 
     source_path = pathlib.Path(args.source)
@@ -160,62 +168,62 @@ def main():
 
     metadata_result = Metadata.from_yaml_file(metadata_file)
     if isinstance(metadata_result, list):
-        print(
-            f"Error: Metadata file '{metadata_file}' must contain a single metadata object.", file=sys.stderr)
+        print(f"Error: Metadata file '{metadata_file}' must contain a single metadata object.", file=sys.stderr)
         sys.exit(1)
 
     metadata: Metadata = metadata_result
 
-    include_config = IncludeConfig(delete_exclude=[], include_roms=[])
-    if args.named_set:
-        if args.named_set not in metadata.named_sets:
-            print(
-                f"Error: Named set '{args.named_set}' not found in the metadata.yml.", file=sys.stderr)
+    if args.set_config:
+        set_config_path = source_path / pathlib.Path(args.set_config).with_suffix('.yml')
+        if not set_config_path.exists():
+            print(f"Error: Set config file {args.set_config} does not exist at {set_config_path}.", file=sys.stderr)
             sys.exit(1)
-        named_set = metadata.named_sets[args.named_set]
-        include_config.delete_exclude = [normalize_unicode(exclude) for exclude in named_set.delete_excludes or []]
-        for ns_include in named_set.includes:
-            try:
-                rom_folder = lookup_rom_folder(ns_include.name, metadata)
-                destination = resolve_destination(
-                    rom_folder, dest_path, ns_include.destination)
-                includes = [normalize_unicode(include) for include in ns_include.includes or []]
-                excludes = [normalize_unicode(exclude) for exclude in ns_include.excludes or []]
-                include_config.add_include(rom_folder, destination, includes, excludes, ns_include.folder_per_game)
-            except ValueError as e:
-                print(f"Error: {e}", file=sys.stderr)
-                sys.exit(1)
+
+
+        set_config_result = RomSetConfig.from_yaml_file(set_config_path)
+        if isinstance(set_config_result, list):
+            print(f"Error: Set config file '{metadata_file}' must contain a single object.", file=sys.stderr)
+            sys.exit(1)
+        set_config: RomSetConfig = set_config_result
+
+        try:
+            resolved_set_config = ResolvedRomSetConfig.convert(set_config, dest_path, metadata)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
     else:
-        include_config.delete_exclude = args.delete_exclude
-        destination_mapping = {name: dest for (name, dest) in args.destination_mapping}
+        includes = []
         for rom_folder in metadata.roms:
-            if args.include and rom_folder.name not in args.include:
-                continue
-            if args.exclude and rom_folder.name in args.exclude:
-                continue
-            destination = resolve_destination(
-                rom_folder, dest_path, destination_mapping.get(rom_folder.name))
-            include_config.add_include(rom_folder, destination)
+            includes.append(ResolvedIncludeConfig(rom_folder, resolve_destination(rom_folder, dest_path, None, None)))
+        resolved_set_config = ResolvedRomSetConfig(includes)
 
-    sync_roms(source_path, dest_path, include_config, args.threads,
-              args.overwrite, args.sync_delete, args.dry_run, args.force)
+    sync_roms(source_path, dest_path, resolved_set_config, args.parallel_copies,
+              args.overwrite, args.sync_delete, args.delete_hidden, args.dry_run, args.force)
 
 
-def lookup_rom_folder(rom_folder_name: str, metadata: Metadata) -> RomFolder:
-    for rom_folder in metadata.roms:
-        if rom_folder.name == rom_folder_name:
-            return rom_folder
+def resolve_destination(rom_folder: RomFolder,
+                        dest_path: pathlib.Path,
+                        root_folder:str | None,
+                        destination: str | None) -> pathlib.Path:
 
-    raise ValueError(f"The rom folder '{rom_folder_name}' was not found.")
-
-
-def resolve_destination(rom_folder: RomFolder, dest_path: pathlib.Path, destination: str | None) -> pathlib.Path:
     if destination is None:
-        return normalize_path(dest_path / pathlib.Path(rom_folder.path))
+        if root_folder is None or root_folder == '': 
+            return normalize_path(dest_path / rom_folder.path)
+        else:
+            return normalize_path(dest_path / root_folder / rom_folder.path)
     elif destination in ['', '.']:
-        return normalize_path(dest_path.resolve())
+        if root_folder is None or root_folder == '': 
+            return normalize_path(dest_path)
+        else:
+            return normalize_path(dest_path / root_folder)
     else:
-        return normalize_path(dest_path / destination)
+        if destination.startswith('/'):
+            return normalize_path(dest_path / destination[1:])
+        elif root_folder is None or root_folder == '':
+            return normalize_path(dest_path / destination)
+        else:
+            return normalize_path(dest_path / root_folder / destination)
+        
 
 def normalize_path(path: pathlib.Path) -> pathlib.Path:
     return pathlib.Path(normalize_unicode(str(path))).resolve()
@@ -225,14 +233,15 @@ def normalize_unicode(text: str) -> str:
 
 def sync_roms(source_path: pathlib.Path,
               dest_path: pathlib.Path,
-              include_config: IncludeConfig,
+              rom_set_config: ResolvedRomSetConfig,
               threads: int,
               overwrite: bool,
               sync_delete: bool,
+              delete_hidden: bool,
               dry_run: bool,
               force: bool):
-    copy_tasks = scan_source_files(source_path, include_config.include_roms)
-    (files_to_delete, dirs_to_delete) = scan_for_files_to_delete(include_config, copy_tasks, sync_delete)
+    copy_tasks = scan_source_files(source_path, rom_set_config.includes)
+    (files_to_delete, dirs_to_delete) = scan_for_files_to_delete(rom_set_config, copy_tasks, sync_delete, delete_hidden)
 
     # filter out copy tasks where the destination file exists, is the same size,
     # and the source file was not modified since the destination was last copied.
@@ -246,7 +255,9 @@ def sync_roms(source_path: pathlib.Path,
 
     _, _, free = shutil.disk_usage(dest_path)
     if not force and extra_space > 0 and free < extra_space:
-        print(f"Insufficient free space on destination path {dest_path}.  Free space {humanfriendly.format_size(free, binary=True)}, required space {humanfriendly.format_size(extra_space, binary=True)}")
+        print(f"Insufficient free space on destination path {dest_path}.  " +
+               f"Free space {humanfriendly.format_size(free, binary=True)}, " +
+               f"required space {humanfriendly.format_size(extra_space, binary=True)}")
         sys.exit(1)
 
     if dry_run:
@@ -314,7 +325,7 @@ def sync_roms(source_path: pathlib.Path,
                     future.result()
 
 
-def scan_source_files(source_path: pathlib.Path, include_roms: list[RomIncludeConfig]) -> list[CopyTask]:
+def scan_source_files(source_path: pathlib.Path, include_roms: list[ResolvedIncludeConfig]) -> list[CopyTask]:
     source_files = []
     for include in include_roms:
         scan_dir = source_path / include.rom_folder.path
@@ -345,9 +356,10 @@ def scan_source_files(source_path: pathlib.Path, include_roms: list[RomIncludeCo
 
     return source_files
 
-def scan_for_files_to_delete(include_config: IncludeConfig,
+def scan_for_files_to_delete(rom_set_config: ResolvedRomSetConfig,
                              copy_tasks: list[CopyTask],
-                             sync_delete: bool) -> tuple[set[pathlib.Path], set[pathlib.Path]]:
+                             sync_delete: bool,
+                             delete_hidden: bool) -> tuple[set[pathlib.Path], set[pathlib.Path]]:
     if not sync_delete:
         return (set(), set())
 
@@ -356,7 +368,7 @@ def scan_for_files_to_delete(include_config: IncludeConfig,
     files_to_delete = set()
     dirs_to_delete = set()
 
-    for include in include_config.include_roms:
+    for include in rom_set_config.includes:
         if include.destination in scanned_dests:
             continue
 
@@ -373,12 +385,12 @@ def scan_for_files_to_delete(include_config: IncludeConfig,
                     continue
 
                 # ignore hidden files
-                if file.name.startswith('.'):
+                if not delete_hidden and file.name.startswith('.'):
                     continue
 
                 normalized_file = normalize_path(file)
 
-                if any(normalized_file.match(exclude) for exclude in include_config.delete_exclude):
+                if any(normalized_file.match(exclude) for exclude in rom_set_config.delete_excludes):
                     continue
 
                 if normalized_file not in expected_dst_paths:
@@ -401,20 +413,14 @@ def scan_for_files_to_delete(include_config: IncludeConfig,
 
     return (files_to_delete, dirs_to_delete)
 
-def is_interested_rom(file: pathlib.Path, rom_include_config: RomIncludeConfig) -> bool:
-    for include in rom_include_config.includes:
-        if not file.match(include):
-            return False
+def is_interested_rom(file: pathlib.Path, include_config: ResolvedIncludeConfig) -> bool:
+    if not any(file.name.lower().endswith(ext.lower()) for ext in include_config.rom_folder.extensions):
+        return False
 
-    for exclude in rom_include_config.excludes:
-        if file.match(exclude):
-            return False
+    if not all(not file.match(exclude) for exclude in include_config.excludes):
+        return False
 
-    for ext in rom_include_config.rom_folder.extension:
-        if file.name.lower().endswith(ext.lower()):
-            return True
-
-    return False
+    return not include_config.includes or any(file.match(include) for include in include_config.includes)
 
 def get_folder_name(rom_folder: RomFolder, source_file: pathlib.Path) -> str:
     if rom_folder.collections:
