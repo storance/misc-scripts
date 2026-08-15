@@ -4,20 +4,19 @@ import argparse
 import pathlib
 import sys
 import os
-import unicodedata
 import shutil
 import humanfriendly
-import re
-import fnmatch
+import traceback
 from enum import StrEnum
 from queue import Queue
 from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
-from dataclasses import dataclass, field
-from dataclass_wizard import JSONWizard
-from dataclass_wizard.mixins.yaml import YAMLWizard
+from dataclasses import dataclass
+from ruamel.yaml import YAML
+from ruamel.yaml.error import YAMLError
+from roms import ParseError, Location, Metadata, Profile, ProfileRomFolderConfig, normalize_unicode
 
-DEFAULT_GAME_NAME_EXTRACTOR = re.compile(r'^(.+?)(?:\s*\(.+\)\s*)*\..+$')
+DEBUG = False
 
 
 class DotFilesMode(StrEnum):
@@ -31,178 +30,6 @@ class DotFilesMode(StrEnum):
 
     def should_copy(self):
         return self == DotFilesMode.BOTH or self == DotFilesMode.COPY_FROM_SRC
-
-
-class MatchType(StrEnum):
-    PREFIX = 'prefix'
-    GLOB = 'glob'
-    REGEX = 'regex'
-
-
-@dataclass(frozen=True)
-class Metadata(YAMLWizard):
-    roms: list[RomFolder]
-
-
-@dataclass(frozen=True)
-class RomFolder:
-    path: str
-    name: str
-    includes: list[str]
-    excludes: list[str] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
-class YamlProfile(YAMLWizard):
-    includes: list[YamlProfileInclude]
-    root_folder: str | None = None
-    delete_excludes: list[str] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
-class YamlFolderPerGameConfig:
-    enabled: bool = False
-    game_name_extractor: str = DEFAULT_GAME_NAME_EXTRACTOR.pattern
-    overrides: dict[str, list[YamlMatcherConfig]] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class YamlMatcherConfig:
-    pattern: str
-    case_sensitive: bool = False
-    type: MatchType = MatchType.GLOB
-
-
-@dataclass(frozen=True)
-class YamlProfileInclude:
-    name: str
-    destination: str | None = None
-    includes: list[str] = field(default_factory=list)
-    excludes: list[str] = field(default_factory=list)
-    folder_per_game: YamlFolderPerGameConfig = YamlFolderPerGameConfig()
-    flatten: bool = False
-
-
-@dataclass(frozen=True)
-class Profile:
-    includes: list[ProfileInclude]
-    delete_excludes: list[str] = field(default_factory=list)
-
-    @staticmethod
-    def convert(yaml_profile: YamlProfile, dest_path: pathlib.Path, metadata: Metadata) -> Profile:
-        delete_excludes = [normalize_unicode(
-            exclude) for exclude in yaml_profile.delete_excludes]
-        includes = []
-        for yaml_profile_include in yaml_profile.includes:
-            rom_folder = lookup_rom_folder(yaml_profile_include.name, metadata)
-            includes.append(ProfileInclude.convert(
-                yaml_profile_include, dest_path, yaml_profile.root_folder, rom_folder))
-
-        return Profile(includes, delete_excludes)
-
-
-def lookup_rom_folder(rom_folder_name: str, metadata: Metadata) -> RomFolder:
-    for rom_folder in metadata.roms:
-        if rom_folder.name == rom_folder_name:
-            return rom_folder
-
-    raise ValueError(
-        f"The rom folder '{rom_folder_name}' was not found in the metadata.yml.")
-
-
-@dataclass(frozen=True)
-class FolderPerGameConfig:
-    enabled: bool = False
-    game_name_extractor: re.Pattern = DEFAULT_GAME_NAME_EXTRACTOR
-    overrides: dict[str, list[MatcherConfig]] = field(default_factory=dict)
-
-    @staticmethod
-    def convert(yaml_config: YamlFolderPerGameConfig) -> FolderPerGameConfig:
-        overrides = {name: [MatcherConfig.convert(matcher) for matcher in matchers]
-                     for name, matchers in yaml_config.overrides.items()}
-
-        return FolderPerGameConfig(
-            enabled=yaml_config.enabled,
-            game_name_extractor=re.compile(yaml_config.game_name_extractor),
-            overrides=overrides
-        )
-
-    def extract_game_name(self, path: pathlib.Path) -> str:
-        for (name, matchers) in self.overrides.items():
-            if any(matcher.matches(path) for matcher in matchers):
-                return name
-
-        result = self.game_name_extractor.match(path.name)
-        if result is None or result.group(1) is None:
-            raise ValueError(f"Failed to extract game name from {path}")
-
-        return result.group(1)
-
-
-@dataclass(frozen=True)
-class MatcherConfig:
-    pattern: str
-    type: MatchType = MatchType.GLOB
-    case_sensitive: bool = False
-    compiled_pattern: re.Pattern = field(init=False)
-
-    @staticmethod
-    def convert(yaml_config: YamlMatcherConfig) -> MatcherConfig:
-        return MatcherConfig(
-            type=yaml_config.type,
-            pattern=yaml_config.pattern,
-            case_sensitive=yaml_config.case_sensitive)
-
-    def __post_init__(self):
-        re_flags = re.NOFLAG if self.case_sensitive else re.IGNORECASE
-        compiled_pattern = None
-        if self.type == MatchType.REGEX:
-            compiled_pattern = re.compile(self.pattern, re_flags)
-        elif self.type == MatchType.GLOB:
-            compiled_pattern = re.compile(
-                fnmatch.translate(self.pattern), re_flags)
-        elif self.type == MatchType.PREFIX:
-            compiled_pattern = re.compile(
-                '^' + re.escape(self.pattern) + '.*', re_flags)
-        else:
-            raise ValueError(f"Unsupported match type: {self.type}")
-
-        object.__setattr__(self, "compiled_pattern", compiled_pattern)
-
-    def matches(self, path: pathlib.Path) -> bool:
-        return self.compiled_pattern.match(path.name) is not None
-
-
-@dataclass(frozen=True)
-class ProfileInclude:
-    rom_folder: RomFolder
-    destination: pathlib.Path
-    includes: list[str] = field(default_factory=list)
-    excludes: list[str] = field(default_factory=list)
-    folder_per_game: FolderPerGameConfig = FolderPerGameConfig()
-    flatten: bool = False
-
-    @staticmethod
-    def convert(yaml_profile_include: YamlProfileInclude,
-                dest_path: pathlib.Path,
-                root_folder: str | None,
-                rom_folder: RomFolder) -> ProfileInclude:
-        destination = resolve_destination(
-            rom_folder, dest_path, root_folder, yaml_profile_include.destination)
-        includes = [normalize_unicode(include)
-                    for include in yaml_profile_include.includes]
-        excludes = [normalize_unicode(exclude)
-                    for exclude in yaml_profile_include.excludes]
-
-        return ProfileInclude(
-            rom_folder=rom_folder,
-            destination=destination,
-            includes=includes,
-            excludes=excludes,
-            folder_per_game=FolderPerGameConfig.convert(
-                yaml_profile_include.folder_per_game),
-            flatten=yaml_profile_include.flatten
-        )
 
 
 @dataclass(frozen=True)
@@ -263,7 +90,7 @@ def main():
     parser.add_argument('destination',
                         help='Destination directory where the roms will be copied to.')
 
-    profile_group = parser.add_mutually_exclusive_group()
+    profile_group = parser.add_mutually_exclusive_group(required=True)
     profile_group.add_argument('-p', '--profile',
                                help='Use the profile specified by the YAML file in the profiles directory in the source path.')
     profile_group.add_argument('-f', '--profile-path',
@@ -294,28 +121,39 @@ def main():
               file=sys.stderr)
         sys.exit(1)
 
-    metadata = Metadata.from_yaml_file(metadata_file)
-    if isinstance(metadata, list):
-        print(
-            f"Error: Metadata file '{metadata_file}' must contain a single metadata object.", file=sys.stderr)
-        sys.exit(1)
-
     try:
-        if args.profile_path:
-            profile = read_profile(pathlib.Path(
-                args.profile_path), dest_path, metadata)
-        elif args.profile:
-            profile_path = source_path / 'profiles' / \
-                pathlib.Path(args.profile).with_suffix('.yml')
-            profile = read_profile(profile_path, dest_path, metadata)
-        else:
-            includes = []
-            for rom_folder in metadata.roms:
-                includes.append(ProfileInclude(rom_folder=rom_folder,
-                                               destination=resolve_destination(rom_folder, dest_path, None, None)))
-            profile = Profile(includes)
+        metadata = read_metadata(metadata_file)
+    except ParseError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        print(f"  in {e.location}", file=sys.stderr)
+        sys.exit(1)
+    except YAMLError as e:
+        print(f"Error {e}")
+        sys.exit(1)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
+        if DEBUG:
+            traceback.print_exc()
+        sys.exit(1)
+
+    if args.profile_path:
+        profile_path = pathlib.Path(args.profile_path)
+    else:
+        profile_path = source_path / 'profiles' / pathlib.Path(args.profile).with_suffix('.yml')
+
+    try:
+        profile = read_profile(profile_path, metadata)
+    except ParseError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        print(f"  in {e.location}", file=sys.stderr)
+        sys.exit(1)
+    except YAMLError as e:
+        print(f"Error {e}")
+        sys.exit(1)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        if DEBUG:
+            traceback.print_exc()
         sys.exit(1)
 
     sync_roms(source_path,
@@ -329,51 +167,25 @@ def main():
               args.ignore_disk_space_check)
 
 
-def read_profile(profile_path: pathlib.Path,
-                 dest_path: pathlib.Path,
-                 metadata: Metadata) -> Profile:
+def read_metadata(metadata_path: pathlib.Path) -> Metadata:
+    if not metadata_path.exists():
+        raise ValueError(f"Metadata file '{metadata_path}' does not exist.")
+
+    yaml = YAML(typ='rt')
+    data = yaml.load(metadata_path)
+    location = Location(None, metadata_path, data.lc.line+1)
+    return Metadata.from_yaml(data, location)
+
+
+def read_profile(profile_path: pathlib.Path, metadata: Metadata) -> Profile:
     if not profile_path.exists():
         raise ValueError(f"Profile '{profile_path}' does not exist.")
 
-    yaml_profile = YamlProfile.from_yaml_file(profile_path)
-    if isinstance(yaml_profile, list):
-        raise ValueError(
-            f"Error: Profile '{profile_path}' must contain a single object.")
+    yaml = YAML(typ='rt')
+    data = yaml.load(profile_path)
+    location = Location(None, profile_path, data.lc.line+1)
 
-    return Profile.convert(yaml_profile, dest_path, metadata)
-
-
-def resolve_destination(rom_folder: RomFolder,
-                        dest_path: pathlib.Path,
-                        root_folder: str | None,
-                        destination: str | None) -> pathlib.Path:
-
-    if destination is None:
-        resolved_path = join_dest_path(dest_path, root_folder, rom_folder.path)
-    elif destination.startswith('/'):
-        resolved_path = normalize_path(dest_path / destination[1:])
-    else:
-        resolved_path = join_dest_path(dest_path, root_folder, destination)
-
-    if not resolved_path.is_relative_to(dest_path):
-        raise ValueError(
-            f"Destination path {resolved_path} is not a relative path to the destination folder")
-    return resolved_path
-
-
-def join_dest_path(dest_path: pathlib.Path, root_folder: str | None, relative_path: str) -> pathlib.Path:
-    if root_folder is None or root_folder == '':
-        return normalize_path(dest_path / relative_path)
-    else:
-        return normalize_path(dest_path / root_folder / relative_path)
-
-
-def normalize_path(path: pathlib.Path) -> pathlib.Path:
-    return pathlib.Path(normalize_unicode(str(path))).resolve()
-
-
-def normalize_unicode(text: str) -> str:
-    return unicodedata.normalize('NFC', text)
+    return Profile.from_yaml(data, location, metadata)
 
 
 def sync_roms(source_path: pathlib.Path,
@@ -385,8 +197,7 @@ def sync_roms(source_path: pathlib.Path,
               dot_files_mode: DotFilesMode,
               dry_run: bool,
               ignore_disk_space_check: bool):
-    copy_tasks = scan_source_files(
-        source_path, profile.includes, dot_files_mode)
+    copy_tasks = scan_source_files(source_path, dest_path, profile.rom_folders, dot_files_mode)
     (files_to_delete, dirs_to_delete) = scan_for_files_to_delete(
         profile, copy_tasks, sync_delete, dot_files_mode)
 
@@ -413,38 +224,39 @@ def sync_roms(source_path: pathlib.Path,
 
 
 def scan_source_files(source_path: pathlib.Path,
-                      profile_includes: list[ProfileInclude],
+                      dest_path: pathlib.Path,
+                      profile_rom_folders: list[ProfileRomFolderConfig],
                       dot_files_mode: DotFilesMode) -> set[CopyTask]:
     copy_tasks = set()
-    for profile_include in profile_includes:
-        scan_dir = source_path / profile_include.rom_folder.path
+    for rom_folder_config in profile_rom_folders:
+        scan_dir = source_path / rom_folder_config.rom_folder.path
         if not scan_dir.exists() or not scan_dir.is_dir():
             print(
                 f"Warning: Source rom folder '{scan_dir}' does not exist or is not a directory. Skipping.")
             continue
 
-        for glob_pattern in profile_include.rom_folder.includes:
+        for glob_pattern in rom_folder_config.rom_folder.includes:
             for file in scan_dir.glob(glob_pattern):
                 if not dot_files_mode.should_copy() and file.name.startswith("."):
                     continue
 
                 normalized_file = normalize_path(file)
-                if not normalized_file.is_file() or not is_interested_rom(normalized_file, profile_include):
+                if not normalized_file.is_file() or not is_interested_rom(normalized_file, rom_folder_config):
                     continue
 
                 stat_result = file.stat()
 
-                if profile_include.flatten or profile_include.folder_per_game:
+                if rom_folder_config.flatten or rom_folder_config.folder_per_game:
                     relative_path = normalized_file.name
                 else:
                     relative_path = normalized_file.relative_to(scan_dir)
 
-                if profile_include.folder_per_game.enabled:
-                    folder_name = profile_include.folder_per_game.extract_game_name(
+                if rom_folder_config.folder_per_game.enabled:
+                    folder_name = rom_folder_config.folder_per_game.extract_game_name(
                         normalized_file)
-                    dest = profile_include.destination / folder_name / relative_path
+                    dest = rom_folder_config.resolve_destination(dest_path) / folder_name / relative_path
                 else:
-                    dest = profile_include.destination / relative_path
+                    dest = rom_folder_config.resolve_destination(dest_path) / relative_path
 
                 dest_stat = None
                 if dest.exists():
@@ -454,6 +266,10 @@ def scan_source_files(source_path: pathlib.Path,
                     CopyTask(normalized_file, stat_result, dest, dest_stat))
 
     return copy_tasks
+
+
+def normalize_path(path: pathlib.Path) -> pathlib.Path:
+    return pathlib.Path(normalize_unicode(str(path)))
 
 
 def scan_for_files_to_delete(profile: Profile,
@@ -469,7 +285,7 @@ def scan_for_files_to_delete(profile: Profile,
     files_to_delete = set()
     dirs_to_delete = set()
 
-    for include in profile.includes:
+    for include in profile.rom_folders:
         if include.destination in scanned_dests:
             continue
 
@@ -491,7 +307,7 @@ def scan_for_files_to_delete(profile: Profile,
 
                 normalized_file = normalize_path(file)
 
-                if any(normalized_file.match(exclude) for exclude in profile.delete_excludes):
+                if any(exclude.matches(normalized_file) for exclude in profile.delete_excludes):
                     continue
 
                 if normalized_file not in expected_dst_paths:
@@ -515,14 +331,14 @@ def scan_for_files_to_delete(profile: Profile,
     return (files_to_delete, dirs_to_delete)
 
 
-def is_interested_rom(file: pathlib.Path, profile_include: ProfileInclude) -> bool:
-    if any(file.match(exclude) for exclude in profile_include.rom_folder.excludes):
+def is_interested_rom(file: pathlib.Path, rom_folder_config: ProfileRomFolderConfig) -> bool:
+    if any(file.match(exclude) for exclude in rom_folder_config.rom_folder.excludes):
         return False
 
-    if not all(not file.match(exclude) for exclude in profile_include.excludes):
+    if not all(not exclude.matches(file) for exclude in rom_folder_config.excludes):
         return False
 
-    return not profile_include.includes or any(file.match(include) for include in profile_include.includes)
+    return not rom_folder_config.includes or any(include.matches(file) for include in rom_folder_config.includes)
 
 
 def check_disk_space(dest_path: pathlib.Path, extra_space: int):
