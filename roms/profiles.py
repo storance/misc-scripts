@@ -2,12 +2,13 @@ import re
 import pathlib
 from typing import Any
 from .pattern import Pattern
-from .common import ParseError, Location, YamlType, extract_key, extract_key_and_location, enumerate_seq, enumerate_mapping, validate_type, normalize_unicode
+from .common import ParseError, Location, YamlType, extract_key, extract_key_and_location, \
+    enumerate_seq, enumerate_mapping, validate_type, normalize_unicode, compile_regex
 from .metadata import Metadata, RomFolder
 from dataclasses import dataclass
 
 
-DEFAULT_GAME_NAME_EXTRACTOR = re.compile(r'^(.+?)(?:\s*\(.+\)\s*)*\..+$')
+DEFAULT_GAME_NAME_EXTRACTOR = re.compile(r'^(.+?)(?:\s*\(.+\)\s*)*\..+$', re.IGNORECASE)
 DEFAULT_REPLACEMENT = r'\1'
 
 
@@ -26,8 +27,8 @@ class Profile:
             root_folder = pathlib.Path(normalize_unicode(root_folder))
 
         raw_rom_folders, rom_folders_loc = extract_key_and_location(yaml_value, 'rom_folders', location,
-                                                                required=True,
-                                                                expected_types=YamlType.SEQ)
+                                                                    required=True,
+                                                                    expected_types=YamlType.SEQ)
         rom_folders = [ProfileRomFolderConfig.from_yaml(rom_folder, loc, root_folder, metadata)
                        for rom_folder, loc in enumerate_seq(raw_rom_folders, rom_folders_loc)]
 
@@ -84,13 +85,15 @@ class ProfileRomFolderConfig:
                                       fpg_config,
                                       flatten)
 
-    def resolve_destination(self, dest_path: pathlib.Path) -> pathlib.Path:
-        resolved_dest = (dest_path / self.destination).resolve()
+    def get_relative_destination(self, src_relative_path: pathlib.Path) -> pathlib.Path:
+        if self.flatten or self.folder_per_game.enabled:
+            src_relative_path = pathlib.Path(src_relative_path.name)
 
-        if not resolved_dest.is_relative_to(dest_path):
-            raise ValueError(f"Destination path {resolved_dest} is not a relative path to the destination folder")
-
-        return resolved_dest
+        if self.folder_per_game.enabled:
+            folder_name = self.folder_per_game.extract_game_name(src_relative_path)
+            return self.destination / folder_name / src_relative_path
+        else:
+            return self.destination / src_relative_path
 
 
 @dataclass
@@ -140,14 +143,14 @@ class FolderPerGameConfig:
 class GameNameExtractorConfig:
     pattern: re.Pattern = DEFAULT_GAME_NAME_EXTRACTOR
     replacement: str = DEFAULT_REPLACEMENT
+    case_sensitive: bool = False
 
     @staticmethod
     def from_yaml(yaml_value: Any, location: Location) -> GameNameExtractorConfig:
-        validate_type(yaml_value, [YamlType.STRING,
-                      YamlType.MAPPING], location)
+        validate_type(yaml_value, [YamlType.STRING, YamlType.MAPPING], location)
 
         if isinstance(yaml_value, str):
-            return GameNameExtractorConfig(_compile_regex(yaml_value, location))
+            return GameNameExtractorConfig(compile_regex(yaml_value, location, False))
 
         pattern, pattern_loc = extract_key_and_location(yaml_value, 'pattern', location,
                                                         default=DEFAULT_GAME_NAME_EXTRACTOR.pattern,
@@ -155,9 +158,12 @@ class GameNameExtractorConfig:
         replacement = extract_key(yaml_value, 'replacement', location,
                                   default=DEFAULT_REPLACEMENT,
                                   expected_types=YamlType.STRING)
-        compiled_pattern = _compile_regex(pattern, pattern_loc)
+        case_sensitive = extract_key(yaml_value, 'case_sensitive', location,
+                                     default=False,
+                                     expected_types=YamlType.BOOL)
+        compiled_pattern = compile_regex(pattern, pattern_loc, case_sensitive)
 
-        return GameNameExtractorConfig(compiled_pattern, replacement)
+        return GameNameExtractorConfig(compiled_pattern, replacement, case_sensitive)
 
     def extract(self, path: pathlib.Path) -> str:
         return self.pattern.sub(self.replacement, path.name)
@@ -168,18 +174,10 @@ def _build_destination(rom_folder: RomFolder, root_folder: pathlib.Path | None, 
         destination = rom_folder.path
     else:
         destination = normalize_unicode(destination)
-    
+
     if destination.startswith('/'):
         return pathlib.Path(destination[1:])
     elif root_folder is None:
         return pathlib.Path(destination)
     else:
         return root_folder / pathlib.Path(destination)
-
-
-def _compile_regex(pattern: str, location: Location) -> re.Pattern:
-    try:
-        return re.compile(pattern)
-    except re.error as e:
-        raise ParseError(
-            f"Invalid regular expression for field {location.field}: {e.msg}.", location)

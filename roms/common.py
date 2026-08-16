@@ -1,3 +1,4 @@
+import re
 import pathlib
 import datetime
 import unicodedata
@@ -6,7 +7,6 @@ from enum import StrEnum
 from collections.abc import Generator
 from dataclasses import dataclass
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
-from ruamel.yaml.timestamp import TimeStamp
 
 
 class ParseError(Exception):
@@ -107,6 +107,14 @@ def enumerate_mapping(mapping: dict, parent: Location) -> Generator[tuple[str, A
 
 def normalize_unicode(text: str) -> str:
     return unicodedata.normalize('NFC', text)
+
+def compile_regex(pattern: str, location: Location, case_sensitive: bool = False) -> re.Pattern:
+    re_flags = re.NOFLAG if case_sensitive else re.IGNORECASE
+    try:
+        return re.compile(pattern, re_flags)
+    except re.error as e:
+        raise ParseError(
+            f"Invalid regular expression for field {location.field}: {e.msg}.", location)
 
 
 class YamlType(StrEnum):

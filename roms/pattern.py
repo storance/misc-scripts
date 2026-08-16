@@ -2,81 +2,89 @@ import re
 import fnmatch
 import pathlib
 from typing import Any
-from .common import ParseError, Location, YamlType, extract_key, extract_key_and_location, enumerate_seq, validate_type
+from .common import ParseError, Location, YamlType, extract_key, extract_key_and_location, enumerate_seq, validate_type, compile_regex
 from enum import StrEnum
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
-class MatchType(StrEnum):
+class PatternType(StrEnum):
     PREFIX = 'prefix'
     SUFFIX = 'suffix'
     GLOB = 'glob'
     REGEX = 'regex'
     EXACT = 'exact'
 
-
-@dataclass(frozen=True)
+@dataclass(frozen = True)
 class Pattern:
-    type: MatchType
+    type: PatternType
     pattern: str
-    case_sensitive: bool
-    compiled_pattern: re.Pattern = field(init=False)
+    compiled_pattern: re.Pattern | None = None
+    filename_only: bool = True
+    case_sensitive: bool = False
+
+    def __post_init__(self):
+        if self.type == PatternType.REGEX and self.compiled_pattern is None:
+            raise ValueError("Missing compiled_pattern for regex pattern type")
+
+        if not self.case_sensitive and self.type not in [PatternType.REGEX, PatternType.GLOB]:
+            object.__setattr__(self, 'pattern', self.pattern.casefold())
 
     @staticmethod
     def from_yaml(yaml_value: Any, location: Location) -> Pattern:
-        validate_type(yaml_value, [YamlType.STRING,
-                      YamlType.MAPPING], location)
+        validate_type(yaml_value, [YamlType.STRING, YamlType.MAPPING], location)
 
         if isinstance(yaml_value, str):
-            try:
-                return Pattern(MatchType.GLOB, yaml_value, False)
-            except re.error as e:
-                raise ParseError(f"Invalid pattern for {location.field}: {e.msg}.", location)
+            return Pattern(PatternType.GLOB, yaml_value)
+        
+        pattern, pattern_loc = extract_key_and_location(yaml_value, 'pattern', location,
+                                                        required=True,
+                                                        expected_types=YamlType.STRING)
 
-        pattern, pattern_loc = extract_key_and_location(
-            yaml_value, 'pattern', location, expected_types=YamlType.STRING, required=True)
-
-        raw_type, type_loc = extract_key_and_location(yaml_value, 'type', location, default=str(
-            MatchType.GLOB), expected_types=YamlType.STRING)
+        raw_type, type_loc = extract_key_and_location(yaml_value, 'type', location,
+                                                      default=str(PatternType.GLOB),
+                                                      expected_types=YamlType.STRING)
         try:
-            type = MatchType(yaml_value.get('type', raw_type))
+            type = PatternType(raw_type)
         except ValueError:
             raise ParseError(
-                f"Invalid value '{raw_type} for field {type_loc.field}. Valid values are: {', '.join(list(MatchType))}", type_loc)
+                f"Invalid pattern type '{raw_type} for field {type_loc.field}. Valid values are: {', '.join(list(PatternType))}", type_loc)
 
-        case_sensitive = extract_key(
-            yaml_value, 'case_sensitive', location, default=False, expected_types=YamlType.BOOL)
-        try:
-            return Pattern(type, pattern, case_sensitive)
-        except re.error as e:
-            raise ParseError(f"Invalid pattern for {pattern_loc.field}: {e.msg}.", pattern_loc)
+        case_sensitive = extract_key(yaml_value, 'case_sensitive', location,
+                                     default=False,
+                                     expected_types=YamlType.BOOL)
+
+        filename_only = extract_key(yaml_value, 'filename_only', location,
+                                     default=True,
+                                     expected_types=YamlType.BOOL)
+
+        compiled_pattern = None
+        if type == PatternType.REGEX:
+            compiled_pattern = compile_regex(pattern, pattern_loc)
+        
+        return Pattern(type, pattern, compiled_pattern, case_sensitive, filename_only)
 
     @staticmethod
     def from_yaml_list(yaml_values: list[Any], location: Location) -> list[Pattern]:
         return [Pattern.from_yaml(pattern, loc) for pattern, loc in enumerate_seq(yaml_values, location)]
 
-    def __post_init__(self):
-        re_flags = re.NOFLAG if self.case_sensitive else re.IGNORECASE
-        compiled_pattern = None
-        if self.type == MatchType.REGEX:
-            compiled_pattern = re.compile(self.pattern, re_flags)
-        elif self.type == MatchType.GLOB:
-            compiled_pattern = re.compile(
-                fnmatch.translate(self.pattern), re_flags)
-        elif self.type == MatchType.PREFIX:
-            compiled_pattern = re.compile(
-                '^' + re.escape(self.pattern) + '.*$', re_flags)
-        elif self.type == MatchType.SUFFIX:
-            compiled_pattern = re.compile(
-                '^.*?' + re.escape(self.pattern) + '$', re_flags)
-        elif self.type == MatchType.EXACT:
-            # a bit overkill to make this a regex but it simplifies the matches method
-            compiled_pattern = re.compile(
-                '^' + re.escape(self.pattern) + '$', re_flags)
-        else:
-            raise ValueError(f"Unsupported match type: {self.type}")
-
-        object.__setattr__(self, "compiled_pattern", compiled_pattern)
-
     def matches(self, path: pathlib.Path) -> bool:
-        return self.compiled_pattern.match(path.name) is not None
+        if self.type == PatternType.GLOB and self.filename_only:
+            return path.match(self.pattern, case_sensitive=self.case_sensitive)
+        if self.type == PatternType.GLOB and not self.filename_only:
+            return path.full_match(self.pattern, case_sensitive=self.case_sensitive)
+
+        value = path.name if self.filename_only else str(path)
+        if not self.case_sensitive:
+            value = value.casefold()
+
+        if self.type == PatternType.EXACT:
+            return value == self.pattern
+        if self.type == PatternType.PREFIX:
+            return value.startswith(self.pattern)
+        if self.type == PatternType.SUFFIX:
+            return value.endswith(self.pattern)
+        if self.type == PatternType.REGEX:
+            return self.compiled_pattern.match(value) is not None
+
+        raise ValueError(f"Unsupported pattern type \"{self.type}\"")
+
