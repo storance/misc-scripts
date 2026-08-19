@@ -24,7 +24,7 @@ class Location:
     def __str__(self):
         if self.line is None:
             return f"\"{self.file}\""
-        
+
         return f"\"{self.file}\", line {self.line}"
 
     def child_key(self, key: str, line: int | None) -> Location:
@@ -66,13 +66,14 @@ def extract_location_for_index(l: list, idx: int, parent: Location) -> Location:
 def extract_key(*args, **kwargs) -> Any:
     return extract_key_and_location(*args, **kwargs)[0]
 
+
 def extract_key_and_location(mapping: dict,
-                key: str,
-                parent: Location,
-                default: Any = None,
-                expected_types: YamlType | list[YamlType] | None = None,
-                none_to_default=True,
-                required=False) -> tuple[Any, Location]:
+                             key: str,
+                             parent: Location,
+                             default: Any = None,
+                             expected_types: YamlType | list[YamlType] | None = None,
+                             none_to_default=True,
+                             required=False) -> tuple[Any, Location]:
     if required and key not in mapping:
         raise ParseError(
             f"Missing required '{key}' field in {parent.field if parent.field is not None else "the root"}.", parent)
@@ -99,14 +100,17 @@ def enumerate_seq(seq: list, parent: Location) -> Generator[tuple[Any, Location]
 
         yield (value, location)
 
+
 def enumerate_mapping(mapping: dict, parent: Location) -> Generator[tuple[str, Any, Location], None, None]:
     for key, value in mapping.items():
         location = extract_location_for_key(mapping, key, parent)
 
         yield (key, value, location)
 
+
 def normalize_unicode(text: str) -> str:
     return unicodedata.normalize('NFC', text)
+
 
 def compile_regex(pattern: str, location: Location, case_sensitive: bool = False) -> re.Pattern:
     re_flags = re.NOFLAG if case_sensitive else re.IGNORECASE

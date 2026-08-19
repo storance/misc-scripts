@@ -14,7 +14,8 @@ class PatternType(StrEnum):
     REGEX = 'regex'
     EXACT = 'exact'
 
-@dataclass(frozen = True)
+
+@dataclass(frozen=True)
 class Pattern:
     type: PatternType
     pattern: str
@@ -35,7 +36,7 @@ class Pattern:
 
         if isinstance(yaml_value, str):
             return Pattern(PatternType.GLOB, yaml_value)
-        
+
         pattern, pattern_loc = extract_key_and_location(yaml_value, 'pattern', location,
                                                         required=True,
                                                         expected_types=YamlType.STRING)
@@ -54,13 +55,13 @@ class Pattern:
                                      expected_types=YamlType.BOOL)
 
         filename_only = extract_key(yaml_value, 'filename_only', location,
-                                     default=True,
-                                     expected_types=YamlType.BOOL)
+                                    default=True,
+                                    expected_types=YamlType.BOOL)
 
         compiled_pattern = None
         if type == PatternType.REGEX:
             compiled_pattern = compile_regex(pattern, pattern_loc)
-        
+
         return Pattern(type, pattern, compiled_pattern, case_sensitive, filename_only)
 
     @staticmethod
@@ -87,4 +88,3 @@ class Pattern:
             return self.compiled_pattern.match(value) is not None
 
         raise ValueError(f"Unsupported pattern type \"{self.type}\"")
-
