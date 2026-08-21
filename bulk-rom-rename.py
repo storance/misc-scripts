@@ -127,7 +127,7 @@ def load_dat_files(dat_files: list[pathlib.Path]) -> dict[str, list[GameRomPair]
     games_by_sha1 = {}
     for file in dat_files:
         if not file.exists():
-            raise ValueError("Dat file \"{file}\" does not exist.")
+            raise ValueError(f"Dat file \"{file}\" does not exist.")
 
         dat = load_rom_dat(file)
         for game in dat.games:
