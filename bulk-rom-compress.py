@@ -81,9 +81,9 @@ def main():
             print(f"Error: {args.output_directory} is not a valid directory.", file=sys.stderr)
             return 1
 
-    with open(args.tools_log, 'w') as log_file:
+    with open(args.tool_log, 'w') as log_file:
         for child in input_directory.iterdir():
-            if not child.is_file():
+            if not child.is_file() or child.name[0] == '.':
                 continue
 
             if args.format in [CompressionFormat.CHD, CompressionFormat.CHD_CD] and is_cd_based_image(child):
