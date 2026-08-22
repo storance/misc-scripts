@@ -5,13 +5,13 @@ import pathlib
 import hashlib
 import argparse
 import re
-import os
 import sys
-
+from tqdm import tqdm
 from dataclasses import dataclass
 
 CUE_FILE_PATTERN = re.compile(r'(FILE\s+")([^"]+\.bin)("\s+BINARY)', re.IGNORECASE)
 SHA1_EXT = '.sha1'
+CHUNK_SIZE = 64*1024
 
 
 @dataclass(frozen=True)
@@ -144,20 +144,37 @@ def load_dat_files(dat_files: list[pathlib.Path]) -> dict[str, list[GameRomPair]
 
 
 def calc_sha1_hash(file: pathlib.Path) -> str:
-    cached_hash_file = file.with_name(file.name + SHA1_EXT)
-    if cached_hash_file.exists():
-        with open(cached_hash_file, "r") as f:
+    sha1_file = file.with_name(file.name + SHA1_EXT)
+    if sha1_file.exists():
+        with open(sha1_file, "r") as f:
             sha1 = f.read().strip().casefold()
             return sha1
 
-    with open(file, "rb") as f:
-        digest = hashlib.file_digest(f, "sha1")
-    sha1 = digest.hexdigest().casefold()
+    total_size = file.stat().st_size
 
-    with open(cached_hash_file, 'w') as f:
-        f.write(sha1)
+    print(f"Hashing \"{file}\"")
+    with tqdm(total=total_size,
+              unit='B',
+              unit_scale=True,
+              unit_divisor=1024,
+              desc=f"-> Progress",
+              dynamic_ncols=True,
+              leave=False) as pbar:
+        tqdm.write(f"Hashing \"{file}\"...")
+        digest = hashlib.sha1()
+        with open(file, 'rb') as f:
+            while True:
+                chunk = f.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                pbar.update(len(chunk))
 
-    return sha1
+        sha1 = digest.hexdigest().casefold()
+        with open(sha1_file, 'w') as f:
+            f.write(sha1)
+
+        return sha1
 
 
 def rename_file(old: pathlib.Path, new: pathlib.Path):

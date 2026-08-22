@@ -6,6 +6,7 @@ import io
 import sys
 import pathlib
 import subprocess
+from tqdm import tqdm
 from typing import IO, Any
 from enum import StrEnum
 
@@ -16,6 +17,7 @@ class CompressionFormat(StrEnum):
     CSO = 'cso'
     NKIT = 'nkit'
     RVZ = 'rvz'
+    N3DS_TRIM = '3ds-trim'
 
 
 class CHDFormat(StrEnum):
@@ -27,6 +29,8 @@ IS_WINDOWS = os.name == 'nt'
 DEFAULT_CHDMAN_PATH = 'chdman.exe' if IS_WINDOWS else 'chdman'
 DEFAULT_DOLPHIN_TOOL_PATH = 'DolphinTool.exe' if IS_WINDOWS else 'dolphin-tool'
 DEFAULT_MAXCSO_PATH = 'maxcso.exe' if IS_WINDOWS else 'maxcso'
+DEFAULT_3DSTOOL_PATH = '3dstool.exe' if IS_WINDOWS else '3dstool'
+CHUNK_SIZE = 1024 * 1024
 
 
 def main():
@@ -49,6 +53,11 @@ def main():
                         type=pathlib.Path,
                         default='NKit',
                         help='Path to the NKit tool directory.')
+    parser.add_argument('--3dstool-path',
+                        dest='n3dstool_path',
+                        type=pathlib.Path,
+                        default=DEFAULT_3DSTOOL_PATH,
+                        help='Path to 3dstool executable.')
     parser.add_argument('--dotnet-path',
                         type=pathlib.Path,
                         default='dotnet',
@@ -98,6 +107,8 @@ def main():
                 run_converttonkit(args.nkit_path, args.dotnet_path, child, output_directory, log_file)
             elif args.format == CompressionFormat.RVZ and is_regular_iso(child):
                 run_dolphintool(args.dolphintool_path, child, output_directory, log_file)
+            elif args.format == CompressionFormat.N3DS_TRIM and is_3ds_rom(child):
+                run_3dstool(args.n3dstool_path, child, output_directory, log_file)
 
     return 0
 
@@ -108,6 +119,13 @@ def is_cd_based_image(path: pathlib.Path) -> bool:
 
 def is_regular_iso(path: pathlib.Path) -> bool:
     return path.suffix.casefold() == '.iso' and not path.name.casefold().endswith('.nkit.iso')
+
+
+def is_3ds_rom(path: pathlib.Path) -> bool:
+    name = path.name.casefold()
+
+    return (name.endswith('.3ds') and not name.endswith('.trimmed.3ds')) or \
+        (name.endswith('.cci') and not name.endswith('.trimmed.cci'))
 
 
 def run_chdman(chdman_path: pathlib.Path,
@@ -196,6 +214,7 @@ def run_dolphintool(dolphintool_path: pathlib.Path,
                     iso_path: pathlib.Path,
                     output_directory: pathlib.Path,
                     log_file: IO[Any]):
+
     output_file = output_directory / (iso_path.with_suffix('.rvz').name)
     if output_file.exists():
         print(f"Skipping {output_file.name}: rvz output file already exists.")
@@ -212,6 +231,54 @@ def run_dolphintool(dolphintool_path: pathlib.Path,
                        stderr=log_file)
     except subprocess.CalledProcessError as e:
         print(f"Error: Failed to compress {iso_path.name}. Check log file for error details.", file=sys.stderr)
+
+
+def run_3dstool(n3dstool_path: pathlib.Path,
+                rom_path: pathlib.Path,
+                output_directory: pathlib.Path,
+                log_file: IO[Any]):
+    output_file = output_directory / rom_path.with_suffix('.trimmed.3ds').name
+    if output_file.exists():
+        print(f"Skipping {output_file.name}: trimmed 3ds output file already exists.")
+        return
+
+    try:
+        # 3dstool works in place, so we need to copy the original to the output dir first
+        copy_file(rom_path, output_file)
+
+        tqdm.write(f"Trimming \"{rom_path.name}\"...")
+        args = [str(n3dstool_path), '--trim', '--verbose', '--file', str(output_file)]
+        print(f"Running: {' '.join(args)}", file=log_file)
+        subprocess.run(args,
+                       check=True,
+                       stdout=log_file,
+                       stderr=log_file)
+    except subprocess.CalledProcessError as e:
+        print(f"Error: Failed to trim {rom_path.name}. Check log file for error details.", file=sys.stderr)
+
+
+def copy_file(src: pathlib.Path, dest: pathlib.Path):
+    total_size = src.stat().st_size
+
+    tqdm.write(f"Copying \"{src.name}\" to \"{dest.parent}\"...")
+    with tqdm(total=total_size,
+              unit='B',
+              unit_scale=True,
+              unit_divisor=1024,
+              desc=f"-> Progress",
+              dynamic_ncols=True,
+              leave=False) as pbar:
+        try:
+            with open(src, 'rb') as fsrc, open(dest, 'wb') as fdest:
+                while True:
+                    chunk = fsrc.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    fdest.write(chunk)
+                    pbar.update(len(chunk))
+        except Exception as e:
+            tqdm.write(
+                f"Error: Failed to copy {src.name} to {dest.parent}: {e}")
 
 
 if __name__ == '__main__':
