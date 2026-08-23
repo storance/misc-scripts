@@ -3,7 +3,7 @@ import pathlib
 from typing import Any
 from .pattern import Pattern
 from .common import ParseError, Location, YamlType, extract_key, extract_key_and_location, \
-    enumerate_seq, enumerate_mapping, validate_type, normalize_unicode, compile_regex
+    enumerate_seq, enumerate_mapping, validate_type, compile_regex
 from .metadata import Metadata, RomFolder
 from dataclasses import dataclass
 
@@ -24,7 +24,7 @@ class Profile:
 
         root_folder = extract_key(yaml_value, 'root_folder', location, expected_types=YamlType.STRING)
         if root_folder is not None:
-            root_folder = pathlib.Path(normalize_unicode(root_folder))
+            root_folder = pathlib.Path(root_folder)
 
         raw_rom_folders, rom_folders_loc = extract_key_and_location(yaml_value, 'rom_folders', location,
                                                                     required=True,
@@ -172,8 +172,6 @@ class GameNameExtractorConfig:
 def _build_destination(rom_folder: RomFolder, root_folder: pathlib.Path | None, destination: str | None) -> pathlib.Path:
     if destination is None:
         destination = rom_folder.path
-    else:
-        destination = normalize_unicode(destination)
 
     if destination.startswith('/'):
         return pathlib.Path(destination[1:])

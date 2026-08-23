@@ -4,7 +4,6 @@ import argparse
 import pathlib
 import sys
 import os
-import io
 import shutil
 import humanfriendly
 import traceback
@@ -12,15 +11,14 @@ from tqdm import tqdm
 from enum import StrEnum
 from queue import Queue
 from dataclasses import dataclass
-from collections.abc import Callable
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 from ruamel.yaml.comments import CommentedMap
 from concurrent.futures import ThreadPoolExecutor
-from roms import ParseError, Location, Metadata, Profile, ProfileRomFolderConfig, normalize_unicode
+from roms import ParseError, Location, Metadata, Profile, ProfileRomFolderConfig, sha1_hash_file, remove_cached_sha1
 
 DEBUG = False
-DEFAULT_CHUNK_SIZE = 1024 * 1024
+DEFAULT_CHUNK_SIZE = 1024
 
 
 class DotFilesMode(StrEnum):
@@ -54,12 +52,36 @@ class CopyTask:
     def dest_size(self) -> int:
         return 0 if self.dest_stat is None else self.dest_stat.st_size
 
-    def is_copy_required(self) -> bool:
+    def is_copy_required(self, check_hashes: bool) -> bool:
         if not self.dest.exists() or self.dest_stat is None:
             return True
 
-        return self.dest_stat.st_size != self.source_stat.st_size \
-            or self.dest_stat.st_mtime < self.source_stat.st_mtime
+        if self.dest_stat.st_size != self.source_stat.st_size:
+            return True
+
+        if check_hashes:
+            print (f"Hashing {self.source}")
+            with tqdm(total=self.source_size,
+                          unit='B',
+                          unit_scale=True,
+                          unit_divisor=1024,
+                          desc=f"-> Progress",
+                          dynamic_ncols=True,
+                          leave=False) as pbar:
+                src_hash = sha1_hash_file(self.source, progress_callback=lambda c: pbar.update(c))
+            print (f"Hashing {self.dest}")
+            with tqdm(total=self.source_size,
+                            unit='B',
+                            unit_scale=True,
+                            unit_divisor=1024,
+                            desc=f"-> Progress",
+                            dynamic_ncols=True,
+                            leave=False) as pbar:
+                dest_hash = sha1_hash_file(self.dest, progress_callback=lambda c: pbar.update(c))
+
+            return src_hash != dest_hash
+
+        return self.dest_stat.st_mtime < self.source_stat.st_mtime
 
 
 def main():
@@ -69,7 +91,7 @@ def main():
                         action='store_true',
                         help='Force overwrite existing files at the destination.')
     parser.add_argument('-c', '--parallel-copies',
-                        default=5,
+                        default=3,
                         type=int,
                         help='Number file copies to perform in parallel.')
     parser.add_argument('-D', '--dry-run',
@@ -92,6 +114,9 @@ def main():
                         type=int,
                         default=DEFAULT_CHUNK_SIZE,
                         help="How large of a buffer to use when copying files in kilobytes.")
+    parser.add_argument('-s', '--check-sha1-hashes',
+                        action='store_true',
+                        help='Check the SHA1 hashes of a file to decide if the file should be copied or not.')
     parser.add_argument('source',
                         help='Source directory where the roms exist. ' +
                              'Expects a metadata.yml file to exist in this directory that defines the rom folder layout.')
@@ -149,6 +174,7 @@ def main():
               args.overwrite,
               args.sync_delete,
               args.dot_files_mode,
+              args.check_sha1_hashes,
               args.dry_run,
               args.ignore_disk_space_check)
 
@@ -184,15 +210,20 @@ def sync_roms(source_path: pathlib.Path,
               overwrite: bool,
               sync_delete: bool,
               dot_files_mode: DotFilesMode,
+              check_hashes: bool,
               dry_run: bool,
               ignore_disk_space_check: bool):
     copy_tasks = scan_source_files(source_path, dest_path, profile.rom_folders, dot_files_mode)
-    files_to_delete, dirs_to_delete = scan_for_files_to_delete(profile, copy_tasks, sync_delete, dot_files_mode)
+    files_to_delete, dirs_to_delete = scan_for_files_to_delete(dest_path,
+                                                               profile,
+                                                               copy_tasks,
+                                                               sync_delete,
+                                                               dot_files_mode)
 
     # filter out copy tasks where the destination file exists, is the same size,
     # and the source file was not modified since the destination was last copied.
     # The overwrite flag will override this behavior.
-    to_copy = set(task for task in copy_tasks if overwrite or task.is_copy_required())
+    to_copy = set(task for task in copy_tasks if overwrite or task.is_copy_required(check_hashes))
 
     total_size = sum(task.source_size for task in to_copy)
     extra_space = total_size \
@@ -212,7 +243,7 @@ def sync_roms(source_path: pathlib.Path,
 def scan_source_files(source_path: pathlib.Path,
                       dest_path: pathlib.Path,
                       profile_rom_folders: list[ProfileRomFolderConfig],
-                      dot_files_mode: DotFilesMode) -> set[CopyTask]:
+                      dot_files_mode: DotFilesMode) -> list[CopyTask]:
     copy_tasks = set()
     for rom_folder_config in profile_rom_folders:
         scan_dir = source_path / rom_folder_config.rom_folder.path
@@ -225,12 +256,11 @@ def scan_source_files(source_path: pathlib.Path,
                 if not dot_files_mode.should_copy() and file.name.startswith("."):
                     continue
 
-                normalized_file = normalize_path(file)
-                relative_path = normalized_file.relative_to(scan_dir)
-                if not normalized_file.is_file() or not is_interested_rom(relative_path, rom_folder_config):
+                relative_path = file.relative_to(scan_dir)
+                if not file.is_file() or not is_interested_rom(relative_path, rom_folder_config):
                     continue
 
-                stat_result = normalized_file.stat()
+                stat_result = file.stat()
                 dest = (dest_path / rom_folder_config.get_relative_destination(relative_path)).resolve()
                 if not dest.is_relative_to(dest_path):
                     raise ValueError(
@@ -240,17 +270,14 @@ def scan_source_files(source_path: pathlib.Path,
                 if dest.exists():
                     dest_stat = dest.stat()
 
-                copy_tasks.add(CopyTask(normalized_file, stat_result, dest, dest_stat))
+                copy_tasks.add(CopyTask(file, stat_result, dest, dest_stat))
 
-    return copy_tasks
-
-
-def normalize_path(path: pathlib.Path) -> pathlib.Path:
-    return pathlib.Path(normalize_unicode(str(path)))
+    return sorted(list(copy_tasks), key=lambda t: t.source)
 
 
-def scan_for_files_to_delete(profile: Profile,
-                             copy_tasks: set[CopyTask],
+def scan_for_files_to_delete(dest_path: pathlib.Path,
+                             profile: Profile,
+                             copy_tasks: list[CopyTask],
                              sync_delete: bool,
                              dot_files_mode: DotFilesMode) -> tuple[set[pathlib.Path], set[pathlib.Path]]:
     if not sync_delete:
@@ -262,14 +289,16 @@ def scan_for_files_to_delete(profile: Profile,
     dirs_to_delete = set()
 
     for profile_rom_folder in profile.rom_folders:
-        if profile_rom_folder.destination in scanned_dests:
+        rom_folder_dest_path = dest_path / profile_rom_folder.destination
+
+        if rom_folder_dest_path in scanned_dests:
             continue
 
-        if not profile_rom_folder.destination.exists():
+        if not rom_folder_dest_path.exists():
             continue
 
         nesting_level = 0
-        for root, dirnames, filenames in profile_rom_folder.destination.walk():
+        for root, dirnames, filenames in rom_folder_dest_path.walk():
 
             for name in filenames:
                 file = root / name
@@ -281,15 +310,13 @@ def scan_for_files_to_delete(profile: Profile,
                 if not dot_files_mode.should_delete() and file.name.startswith('.'):
                     continue
 
-                normalized_file = normalize_path(file)
-
-                if any(exclude.matches(normalized_file) for exclude in profile.delete_excludes):
+                if any(exclude.matches(file) for exclude in profile.delete_excludes):
                     continue
 
-                if normalized_file not in expected_dst_paths:
-                    files_to_delete.add(normalized_file)
+                if file not in expected_dst_paths:
+                    files_to_delete.add(file)
                     if nesting_level >= 1:
-                        dirs_to_delete.add(normalized_file.parent)
+                        dirs_to_delete.add(file.parent)
 
             if not profile_rom_folder.folder_per_game or nesting_level >= 1:
                 dirnames.clear()
@@ -302,7 +329,7 @@ def scan_for_files_to_delete(profile: Profile,
 
             nesting_level += 1
 
-        scanned_dests.add(profile_rom_folder.destination)
+        scanned_dests.add(rom_folder_dest_path)
 
     return (files_to_delete, dirs_to_delete)
 
@@ -418,7 +445,7 @@ def copy_file_with_progress_thread(task: CopyTask,
                                    row_pool: Queue,
                                    file_progress: tqdm,
                                    bytes_progress: tqdm,
-                                   chunk_size=DEFAULT_CHUNK_SIZE):
+                                   chunk_size: int):
     position = row_pool.get()
     try:
         copy_file_with_progress(task, position, file_progress, bytes_progress, chunk_size)
@@ -430,7 +457,7 @@ def copy_file_with_progress(task: CopyTask,
                             position: int,
                             file_progress: tqdm,
                             bytes_progress: tqdm,
-                            chunk_size=DEFAULT_CHUNK_SIZE):
+                            chunk_size: int):
     try:
         with tqdm(total=0, bar_format=f"{task}", dynamic_ncols=True, position=2*position, leave=False) as top_line, \
             tqdm(total=task.source_size,
@@ -451,6 +478,8 @@ def copy_file_with_progress(task: CopyTask,
                         fdest.write(chunk)
                         pbar.update(len(chunk))
                         bytes_progress.update(len(chunk))
+
+                remove_cached_sha1(task.dest)
             except Exception as e:
                 tqdm.write(
                     f"Error: Failed to copy {task.source.name} to {task.dest.parent}: {e}")

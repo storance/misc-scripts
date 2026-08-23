@@ -1,6 +1,6 @@
 import pathlib
 from typing import Any
-from .common import ParseError, YamlType, Location, extract_key, extract_key_and_location, enumerate_seq, validate_type, normalize_unicode
+from .common import ParseError, YamlType, Location, extract_key, extract_key_and_location, enumerate_seq, validate_type
 from dataclasses import dataclass
 
 
@@ -40,7 +40,7 @@ class RomFolder:
         excludes = extract_key(yaml_value, 'excludes', location,
                                default=[], expected_types=YamlType.SEQ)
 
-        return RomFolder(normalize_unicode(path), name, includes, excludes)
+        return RomFolder(path, name, includes, excludes)
 
     @staticmethod
     def from_yaml_list(yaml_values: list, location: Location) -> list[RomFolder]:

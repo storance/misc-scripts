@@ -2,7 +2,7 @@ import re
 import fnmatch
 import pathlib
 from typing import Any
-from .common import ParseError, Location, YamlType, extract_key, extract_key_and_location, enumerate_seq, validate_type, compile_regex
+from .common import ParseError, Location, YamlType, extract_key, extract_key_and_location, enumerate_seq, validate_type, compile_regex, normalize_unicode
 from enum import StrEnum
 from dataclasses import dataclass
 
@@ -74,7 +74,7 @@ class Pattern:
         if self.type == PatternType.GLOB and not self.filename_only:
             return path.full_match(self.pattern, case_sensitive=self.case_sensitive)
 
-        value = path.name if self.filename_only else str(path)
+        value = normalize_unicode(path.name if self.filename_only else str(path))
         if not self.case_sensitive:
             value = value.casefold()
 
