@@ -122,6 +122,7 @@ def _scan_for_roms(progress_tracker: RenameProgressTracker,
         # Some systems use .bin as their rom extension that is different from a bin/cue file
         if file_name.endswith('.bin') and '.cue' in extensions:
             bin_files.append(file)
+            continue
 
         if file_name.endswith('.cue'):
             bin_files = [file.parent / name for name in list_bin_files_from_cue(file)]

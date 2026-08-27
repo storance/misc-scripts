@@ -230,11 +230,9 @@ def _copy_file(progress: ProgressWrapper,
         progress.stop(visible=False)
         return True
     except Exception as e:
-        progress.log(
-            f"[red]Error:[/red] Failed to copy file [magenta]\"{src_path}\"[/magenta] to [magenta]\"{dst_path}\"[/magenta]: {e}")
+        logging.error("Failed to copy file \"%s\" to \"%s\": {e}", src_path, dst_path, str(e))
         progress.stop()
         progress.update(failed=True)
-        logging.exception("Failed to copy file \"%s\" to \"%s\": %s", src_path, dst_path, str(e))
 
         _delete_quietly(tmp_file)
         return False

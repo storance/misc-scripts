@@ -10,6 +10,7 @@ from rich.highlighter import RegexHighlighter
 from rom_manager.sync import configure_sync_parser
 from rom_manager.rename import configure_rename_parser
 from rom_manager.hash import configure_hash_parser
+from rom_manager.compress import configure_compress_parser
 
 
 
@@ -41,6 +42,9 @@ def main():
 
     hash_parser = subparsers.add_parser('hash', help='Creates cached .sha1 files for ROMs in a given directory')
     configure_hash_parser(hash_parser)
+
+    compress_parser = subparsers.add_parser('compress', help='Compresses rom files to a specified format')
+    configure_compress_parser(compress_parser)
 
     args = parser.parse_args()
 
