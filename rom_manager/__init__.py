@@ -1,8 +1,9 @@
 from .pattern import Pattern, PatternType
 from .metadata import Metadata, RomFolder
 from .profiles import Profile, ProfileRomFolderConfig, FolderPerGameConfig, GameNameExtractorConfig
-from .common import ParseError, Location, normalize_unicode
-from .hash import sha1_hash_file, remove_cached_sha1, SHA1_EXT
+from .common import ParseError, Location, normalize_unicode, read_yaml_file, generate_random_string
+from .hash_util import sha1_hash_file, remove_sha1_cache, rename_file, SHA1_EXT
+from .dat import DatFile, Header, Game, Rom, load_rom_dat
 
 __all__ = [
     "Pattern",
@@ -15,8 +16,16 @@ __all__ = [
     "GameNameExtractorConfig",
     "ParseError",
     "Location",
+    "DatFile",
+    "Header",
+    "Game",
+    "Rom",
     "normalize_unicode",
+    "read_yaml_file",
+    "generate_random_string",
     "sha1_hash_file",
-    "remove_cached_sha1",
-    "SHA1_EXT"
+    "remove_sha1_cache",
+    "rename_file",
+    "SHA1_EXT",
+    "load_rom_dat"
 ]

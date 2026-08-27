@@ -1,4 +1,7 @@
 import re
+import sys
+import string
+import random
 import pathlib
 import datetime
 import unicodedata
@@ -6,8 +9,9 @@ from typing import Any
 from enum import StrEnum
 from collections.abc import Generator
 from dataclasses import dataclass
+from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
-
+from rich.console import Console
 
 class ParseError(Exception):
     def __init__(self, message: str, location: Location):
@@ -171,3 +175,23 @@ def validate_type(value: Any, expected_types: YamlType | list[YamlType], locatio
         else:
             raise ParseError(
                 f"Invalid type {actual_type} for {location.field}.  Expected type to be one of: {', '.join(expected_types)}.", location)
+
+def read_yaml_file(console: Console, file: pathlib.Path) -> tuple[dict, Location]:
+    try:
+        yaml_parser = YAML(typ='rt')
+        data = yaml_parser.load(file)
+        if isinstance(data, CommentedMap):
+            location = Location(None, file, data.lc.line+1)
+        else:
+            location = Location(None, file, None)
+
+        return (data, location)
+    except ParseError as e:
+        console.log(f"[red]ERROR[/red] {e}\n  in {e.location}")
+        sys.exit(1)
+    except Exception as e:
+        console.log(f"[red]ERROR[/red] Failed to read [magenta]\"{file}\"[/magenta]: {e}")
+        sys.exit(1)
+
+def generate_random_string(size: int):
+    return ''.join(random.choices(string.ascii_lowercase, k=size))

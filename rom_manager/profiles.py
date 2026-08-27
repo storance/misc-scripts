@@ -5,7 +5,7 @@ from .pattern import Pattern
 from .common import ParseError, Location, YamlType, extract_key, extract_key_and_location, \
     enumerate_seq, enumerate_mapping, validate_type, compile_regex
 from .metadata import Metadata, RomFolder
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 DEFAULT_GAME_NAME_EXTRACTOR = re.compile(r'^(.+?)(?:\s*\(.+\)\s*)*\..+$', re.IGNORECASE)
@@ -17,6 +17,7 @@ class Profile:
     root_folder: pathlib.Path | None
     rom_folders: list[ProfileRomFolderConfig]
     delete_excludes: list[Pattern]
+    _interested_exts: set[str] | None = field(default=None, init=False)
 
     @staticmethod
     def from_yaml(yaml_value: Any, location: Location, metadata: Metadata) -> Profile:
@@ -36,6 +37,24 @@ class Profile:
                                                                         default=[])
 
         return Profile(root_folder, rom_folders, Pattern.from_yaml_list(delete_excludes, delete_excludes_loc))
+
+    @property
+    def interested_exts(self) -> set[str]:
+        if self._interested_exts is None:
+            self._interested_exts = set()
+            for rfc in self.rom_folders:
+                self._interested_exts.update(rfc.rom_folder.extensions)
+
+        return self._interested_exts
+
+    def is_interested_ext(self, file: pathlib.Path) -> bool:
+        return any(file.name.endswith(ext) for ext in self.interested_exts)
+
+    def is_include_for_delete(self, file: pathlib.Path) -> bool:
+        if not self.is_interested_ext(file):
+            return False
+        
+        return not any(exclude.matches(file) for exclude in self.delete_excludes)
 
 
 @dataclass(frozen=True)
@@ -94,6 +113,15 @@ class ProfileRomFolderConfig:
             return self.destination / folder_name / src_relative_path
         else:
             return self.destination / src_relative_path
+
+    def is_excluded(self, relative_path: pathlib.Path) -> bool:
+        return any(exclude.matches(relative_path) for exclude in self.excludes)
+
+    def is_included(self, relative_path: pathlib.Path) -> bool:
+        if not self.includes:
+            return True
+
+        return any(include.matches(relative_path) for include in self.includes)
 
 
 @dataclass
