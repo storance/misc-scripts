@@ -18,6 +18,10 @@ class Plan:
     copy_tasks: list[SrcDestPair]
     rename_tasks: list[SrcDestPair]
 
+    def empty(self):
+        return not self.copy_tasks and not self.rename_tasks and \
+            not self.delete_dir_tasks and not self.delete_file_tasks
+
 
 @dataclass(frozen=True)
 class SrcDestPair:

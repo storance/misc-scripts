@@ -109,10 +109,12 @@ def sync_roms(console: Console, args: argparse.Namespace):
             args.threads
         )
 
-        if args.dry_run:
+        if plan.empty():
+            logging.info("Nothing to do. Exiting.")
+        elif args.dry_run:
             _print_dry_run_plan(plan)
         else:
-            _execute_plan(console, progress_tracker, plan, args.buffer_size, args.threads)
+            _execute_plan(progress_tracker, plan, args.buffer_size, args.threads)
 
         progress_tracker.stop()
 
@@ -131,8 +133,7 @@ def _print_dry_run_plan(plan: Plan):
         logging.info("DRY RUN: Renaming \"%s\" to \"%s\".", rename_task.src, rename_task.dst)
 
 
-def _execute_plan(console: Console,
-                  progress_tracker: SyncProgressTracker,
+def _execute_plan(progress_tracker: SyncProgressTracker,
                   plan: Plan,
                   buffer_size: int,
                   thread_count: int):
@@ -147,46 +148,41 @@ def _execute_plan(console: Console,
     if plan.copy_tasks:
         progress_tracker.copy_overall_progress.update(visible=True)
 
-    progress_tracker.delete_overall_progress.start(total=total_to_delete)
-    if plan.delete_dir_tasks:
-        logging.info("Starting delete directory tasks.")
+    if plan.delete_dir_tasks or plan.delete_file_tasks:
+        progress_tracker.delete_overall_progress.start(total=total_to_delete)
+
         for dir in plan.delete_dir_tasks:
             logging.info("Deleting directory \"%s\".", dir)
             try:
                 dir.rmdir()
             except OSError as e:
-                logging.exception("Failed to delete directory \"%s\": %s.", dir, str(e))
+                logging.error("Failed to delete directory \"%s\": %s.", dir, str(e))
             progress_tracker.delete_overall_progress.advance()
-        logging.info("Completed delete directory tasks.")
 
-    if plan.delete_file_tasks:
-        logging.info("Starting delete file tasks.")
         for file in plan.delete_file_tasks:
             logging.info("Deleting file \"%s\".", file)
             try:
                 file.unlink()
             except OSError as e:
-                logging.exception("Failed to delete file \"%s\": %s.", file, str(e))
+                logging.error("Failed to delete file \"%s\": %s.", file, str(e))
             progress_tracker.delete_overall_progress.advance()
-        logging.info("Completed delete file tasks.")
-    progress_tracker.delete_overall_progress.stop()
 
+        progress_tracker.delete_overall_progress.stop()
 
-    progress_tracker.rename_overall_progress.start(total=len(plan.rename_tasks))
     if plan.rename_tasks:
-        logging.info("Starting rename file tasks.")
+        progress_tracker.rename_overall_progress.start(total=len(plan.rename_tasks))
+
         for rename_task in plan.rename_tasks:
             logging.info("Renaming \"%s\" to \"%s\".", rename_task.src, rename_task.dst)
             try:
                 rename_file(rename_task.src, rename_task.dst)
             except OSError as e:
-                logging.exception("Failed to rename file \"%s\": %s.", rename_task.src, str(e))
-        logging.info("Completed rename file tasks.")
-    progress_tracker.rename_overall_progress.stop()
+                logging.error("Failed to rename file \"%s\": %s.", rename_task.src, str(e))
+            progress_tracker.rename_overall_progress.advance()
+        progress_tracker.rename_overall_progress.stop()
 
-    progress_tracker.copy_overall_progress.start(total=len(plan.copy_tasks))
-    if len(plan.copy_tasks) > 0:
-        logging.info("Starting copy file tasks.")
+    if plan.copy_tasks:
+        progress_tracker.copy_overall_progress.start(total=len(plan.copy_tasks))
         with ThreadPoolExecutor(max_workers=thread_count) as executor:
             futures = []
 
@@ -198,9 +194,7 @@ def _execute_plan(console: Console,
             for future in as_completed(futures):
                 future.result()
                 progress_tracker.copy_overall_progress.advance()
-
-        logging.info("Completed copy file tasks.")
-    progress_tracker.copy_overall_progress.stop()
+        progress_tracker.copy_overall_progress.stop()
 
 
 def _copy_file(progress: ProgressWrapper,
@@ -210,12 +204,12 @@ def _copy_file(progress: ProgressWrapper,
     logging.info("Copying \"%s\" to \"%s\".", src_path, dst_path)
     progress.start(visible=True)
 
-    tmp_suffix = generate_random_string(RANDOM_SUFFIX_LEN) 
+    tmp_suffix = generate_random_string(RANDOM_SUFFIX_LEN)
     tmp_file = dst_path.with_name(f"{dst_path.name}.{tmp_suffix}")
 
     try:
         dst_path.parent.mkdir(parents=True, exist_ok=True)
-        
+
         with open(src_path, 'rb') as fsrc, open(tmp_file, 'wb') as fdest:
             while True:
                 chunk = fsrc.read(chunk_size)
@@ -237,8 +231,9 @@ def _copy_file(progress: ProgressWrapper,
         _delete_quietly(tmp_file)
         return False
 
+
 def _delete_quietly(file: pathlib.Path):
-    try:  
+    try:
         file.unlink(missing_ok=True)
     except OSError as e:
-        pass
+        logging.error("Failed to cleanup temp file \"%s\" after failed copy: %s", file, str(e))

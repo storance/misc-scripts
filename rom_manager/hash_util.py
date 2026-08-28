@@ -20,7 +20,7 @@ def sha1_hash_file(file: pathlib.Path,
         progress.advance(total_size)
         progress.stop(visible=False)
         sha1 = _read_sha1_file(sha1_file)
-        logging.info("Hashed \"%s\" to SHA1 %s using cached value.", file, sha1)
+        logging.debug("Hashed \"%s\" to SHA1 %s using cached value.", file, sha1)
         return sha1
 
     try:
@@ -40,12 +40,12 @@ def sha1_hash_file(file: pathlib.Path,
 
         progress.stop(visible=False)
 
-        logging.info("Hashed \"%s\" to SHA1 %s.", file, sha1)
+        logging.debug("Hashed \"%s\" to SHA1 %s.", file, sha1)
         return sha1
     except Exception as e:
         progress.stop()
         progress.update(failed=True)
-        logging.exception("Failed to hash file \"%s\": %s", file, str(e))
+        logging.error("Failed to hash file \"%s\": %s", file, str(e))
         return None
 
 def remove_sha1_cache(file: pathlib.Path):
