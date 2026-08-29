@@ -28,18 +28,13 @@ def sha1_hash_file(file: pathlib.Path,
 
     try:
         digest = hashlib.sha1()
-        f = open(file, 'rb')
-        try:
+        with open(file, 'rb') as f:
             while True:
                 chunk = f.read(chunk_size)
                 if not chunk:
                     break
                 digest.update(chunk)
                 progress.advance(len(chunk))
-        except:
-            logging.exception("Unexpected error hashing file")
-        finally:
-            f.close()
 
         sha1 = digest.hexdigest().casefold()
         if use_cache:
