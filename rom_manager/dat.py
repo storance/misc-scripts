@@ -2,6 +2,8 @@ import pathlib
 from dataclasses import dataclass
 import xml.etree.ElementTree as ET
 
+__all__ = [ 'DatFile', 'Header', 'Game', 'Rom', 'load_rom_dat']
+
 @dataclass(frozen=True)
 class DatFile:
     header: Header|None
@@ -70,9 +72,9 @@ def _parse_rom(rom_element: ET.Element[str]) -> Rom:
     name = rom_element.get('name')
     size = rom_element.get('size')
     crc = rom_element.get('crc')
-    md5 = normalize_hash(rom_element.get('md5'))
-    sha1 = normalize_hash(rom_element.get('sha1'))
-    sha256 = normalize_hash(rom_element.get('256'))
+    md5 = _normalize_hash(rom_element.get('md5'))
+    sha1 = _normalize_hash(rom_element.get('sha1'))
+    sha256 = _normalize_hash(rom_element.get('256'))
 
     if name is None:
         raise ValueError("Missing name element on rom")
@@ -86,5 +88,5 @@ def _find_text_required(element: ET.Element[str], tag: str) -> str:
 
     return value
 
-def normalize_hash(hash: str|None) -> str|None:
+def _normalize_hash(hash: str|None) -> str|None:
     return hash.casefold() if hash is not None else None
