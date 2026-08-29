@@ -62,7 +62,12 @@ def rename_roms(console: Console, args: argparse.Namespace):
                 sys.exit(1)
 
         file_suffixes = [_normalize_ext(ext) for ext in args.extension]
-        scan_result = _scan_for_roms(progress_tracker, input_directory, args.recursive, file_suffixes)
+        try:
+            scan_result = _scan_for_roms(progress_tracker, input_directory, args.recursive, file_suffixes)
+        except Exception as e:
+            progress_tracker.fail_scan()
+            logging.error("Failed to scan \"%s\" input path: %s", input_directory, str(e))
+            sys.exit(1)
 
         files_to_hash = []
         for rom_file in scan_result:
@@ -75,7 +80,12 @@ def rename_roms(console: Console, args: argparse.Namespace):
             logging.info("No rom files found.")
             return
 
-        hashes_by_path = _hash_files(progress_tracker, args.thread_count, files_to_hash)
+        try:
+            hashes_by_path = _hash_files(progress_tracker, args.thread_count, files_to_hash)
+        except Exception as e:
+            progress_tracker.fail_hash()
+            logging.error("Failed to hash files: %s", str(e))
+            sys.exit(1)
         tasks = build_rename_tasks(scan_result, games_by_hash, hashes_by_path, sync_folders)
 
         if not tasks:
@@ -86,11 +96,16 @@ def rename_roms(console: Console, args: argparse.Namespace):
             for task in tasks:
                 task.dry_run()
         else:
-            progress_tracker.rename_overall_progress.start(visible=True, total=len(tasks))
-            for task in tasks:
-                task.execute()
-                progress_tracker.rename_overall_progress.advance()
-            progress_tracker.rename_overall_progress.stop()
+            try:
+                progress_tracker.start_rename(len(tasks))
+                for task in tasks:
+                    task.execute()
+                    progress_tracker.advance_rename()
+                progress_tracker.stop_rename()
+            except Exception as e:
+                progress_tracker.fail_rename()
+                logging.error("Failed to rename files: %s", str(e))
+                sys.exit(1)
 
         progress_tracker.stop()
 
@@ -104,7 +119,7 @@ def _scan_for_roms(progress_tracker: RenameProgressTracker,
                    recursive: bool,
                    extensions: list[str]) -> list[pathlib.Path | CueFile]:
 
-    progress_tracker.scan_overall_progress.start(visible=True)
+    progress_tracker.start_scan()
 
     bin_files = []
     bin_files_from_cue = set()
@@ -140,8 +155,7 @@ def _scan_for_roms(progress_tracker: RenameProgressTracker,
         else:
             logging.debug("Skipping bin file \"%s\" since it was referenced by a cue file.", bin_file)
 
-    progress_tracker.scan_overall_progress.advance()
-    progress_tracker.scan_overall_progress.stop()
+    progress_tracker.complete_scan()
 
     return results
 
@@ -149,7 +163,7 @@ def _scan_for_roms(progress_tracker: RenameProgressTracker,
 def _hash_files(progress_tracker: RenameProgressTracker,
                 thread_count: int,
                 files: list[pathlib.Path]) -> dict[pathlib.Path, str]:
-    progress_tracker.hash_overall_progress.start(visible=True, total=len(files))
+    progress_tracker.start_hash(len(files))
 
     with ThreadPoolExecutor(max_workers=thread_count) as executor:
         futures_to_path = {}
@@ -166,5 +180,5 @@ def _hash_files(progress_tracker: RenameProgressTracker,
 
             hashes[file] = sha1
 
-    progress_tracker.hash_overall_progress.stop()
+    progress_tracker.stop_hash()
     return hashes

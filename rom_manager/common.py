@@ -195,3 +195,6 @@ def read_yaml_file(console: Console, file: pathlib.Path) -> tuple[dict, Location
 
 def generate_random_string(size: int):
     return ''.join(random.choices(string.ascii_lowercase, k=size))
+
+def is_power_of_2(n: int) -> bool:
+    return n > 0 and (n & (n-1)) == 0

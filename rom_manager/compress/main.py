@@ -1,6 +1,5 @@
 import argparse
 import os
-import io
 import sys
 import pathlib
 import subprocess
@@ -21,11 +20,6 @@ class CompressionFormat(StrEnum):
     DECISO = 'deciso'
     WUX = 'wux'
     WBFS = 'wbfs'
-
-
-class CHDFormat(StrEnum):
-    CD = 'createcd'
-    DVD = 'createdvd'
 
 
 IS_WINDOWS = os.name == 'nt'
@@ -80,22 +74,31 @@ def compress_roms(console: Console, args: argparse.Namespace):
                 logging.error("Output directory \"%s\" does not exist or is not a directory.", args.input_directory)
                 sys.exit(1)
 
-        files_to_compress = _scan_files(progress_tracker, args.input_directory, output_directory, args.format)
+        try:
+            files_to_compress = _scan_files(progress_tracker, args.input_directory, output_directory, args.format)
+        except Exception as e:
+            progress_tracker.fail_scan()
+            logging.error("Failed to scan \"%s\" input path: %s",  args.input_directory, str(e))
+            sys.exit(1)
+
         if not files_to_compress:
             logging.info("No ROM files found that need to be compressed.")
             return
 
-        progress_tracker.compress_overall_progress.start(visible=True, total=len(files_to_compress))
+        try:
+            _compress_files(progress_tracker,
+                            files_to_compress,
+                            args.chdman_path,
+                            args.nkit_path,
+                            output_directory,
+                            args.format,
+                            args.force_cd,
+                            args.keys)
+        except Exception as e:
+            progress_tracker.fail_scan()
+            logging.error("Failed to compress files: %s", str(e))
+            sys.exit(1)
 
-        for file in files_to_compress:
-            if args.format == CompressionFormat.CHD:
-                run_chdman(args.chdman_path, file, output_directory, args.force_cd)
-            else:
-                run_nkit(args.nkit_path, file, output_directory, args.format, args.keys)
-
-            progress_tracker.compress_overall_progress.advance()
-
-        progress_tracker.compress_overall_progress.stop()
         progress_tracker.stop()
 
 
@@ -103,7 +106,7 @@ def _scan_files(progress_tracker: CompressProgressTracker,
                 input_directory: pathlib.Path,
                 output_directory: pathlib.Path,
                 format: CompressionFormat) -> list[pathlib.Path]:
-    progress_tracker.scan_overall_progress.start(visible=True)
+    progress_tracker.start_scan()
     results = []
     for child in input_directory.iterdir():
         if not child.is_file() or child.name[0] == '.':
@@ -115,10 +118,30 @@ def _scan_files(progress_tracker: CompressProgressTracker,
 
         _append_if_needed(child, output_directory, format, results)
 
-    progress_tracker.scan_overall_progress.advance()
-    progress_tracker.scan_overall_progress.stop()
+    progress_tracker.complete_scan()
 
     return results
+
+
+def _compress_files(progress_tracker: CompressProgressTracker,
+                    files_to_compress: list[pathlib.Path],
+                    chdman_path: pathlib.Path,
+                    nkit_path: pathlib.Path,
+                    output_directory: pathlib.Path,
+                    format: CompressionFormat,
+                    force_cd: bool,
+                    keys: pathlib.Path | None = None):
+    progress_tracker.start_compress(len(files_to_compress))
+
+    for file in files_to_compress:
+        if format == CompressionFormat.CHD:
+            run_chdman(chdman_path, file, output_directory, force_cd)
+        else:
+            run_nkit(nkit_path, file, output_directory, format, keys)
+
+        progress_tracker.compress_overall_progress.advance()
+
+    progress_tracker.stop_compress()
 
 
 def _is_supported_extension(path: pathlib.Path, format: CompressionFormat) -> bool:
@@ -173,7 +196,7 @@ def run_chdman(chdman_path: pathlib.Path,
     else:
         format = 'createdvd'
     args = [str(chdman_path), format, '-i', str(input_file), '-o', str(output_file)]
-    execute_process(input_file, args, True)
+    _execute_process(input_file, args, True)
 
 
 def run_nkit(nkit_path: pathlib.Path,
@@ -181,17 +204,17 @@ def run_nkit(nkit_path: pathlib.Path,
              output_directory: pathlib.Path,
              format: CompressionFormat,
              keys: pathlib.Path | None):
-    output_file = _get_output_filename(input_file, output_directory, CompressionFormat.CSO)
+    output_file = _get_output_filename(input_file, output_directory, format)
 
     logging.info("Compressing \"%s\" to \"%s\".", input_file, output_file)
     args = [str(nkit_path), '-task', 'convert', '-in', str(input_file),
             '-out', str(output_directory), '-convert', str(format)]
     if keys is not None:
         args.extend(['-keys', str(keys)])
-    execute_process(input_file, args, True)
+    _execute_process(input_file, args, True)
 
 
-def execute_process(input_file: pathlib.Path, args: list[Any], check: bool = True, input: str | None = None):
+def _execute_process(input_file: pathlib.Path, args: list[Any], check: bool = True, input: str | None = None):
     logging.debug("Executing command: %s", ' '.join(args))
     result = subprocess.run(args,
                             text=True,

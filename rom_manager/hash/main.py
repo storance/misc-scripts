@@ -21,7 +21,7 @@ def configure_hash_parser(parser: argparse.ArgumentParser):
     parser.add_argument('-o', '--overwrite',
                         action="store_true",
                         help="Overwrite any existing .sha1 file.")
-    parser.add_argument('-t', '--thread-count',
+    parser.add_argument('-t', '--thread',
                         type=int,
                         default=3,
                         help="Number of threads to use for hashing files.")
@@ -41,12 +41,23 @@ def hash_roms(console: Console, args: argparse.Namespace):
             sys.exit(1)
 
         extensions = [_normalize_ext(ext) for ext in args.extension]
-        rom_files = _scan_for_roms(progress_tracker, input_directory, args.recursive, extensions)
+        try:
+            rom_files = _scan_for_roms(progress_tracker, input_directory, args.recursive, extensions)
+        except Exception as e:
+            progress_tracker.fail_scan()
+            logging.error("Failed to scan \"%s\" input path: %s", input_directory, str(e))
+            sys.exit(1)
+
         if len(rom_files) == 0:
             logging.info("No rom files found.")
             return
 
-        _hash_files(progress_tracker, args.thread_count, args.overwrite, rom_files)
+        try:
+            _hash_files(progress_tracker, args.threads, args.overwrite, rom_files)
+        except Exception as e:
+            progress_tracker.fail_hash()
+            logging.error("Failed to hash files: %s", str(e))
+            sys.exit(1)
         progress_tracker.stop()
 
 def _normalize_ext(ext: str) -> str:
@@ -58,7 +69,7 @@ def _scan_for_roms(progress_tracker: HashProgressTracker,
                    recursive: bool,
                    extensions: list[str]) -> list[pathlib.Path]:
 
-    progress_tracker.scan_overall_progress.start(visible=True)
+    progress_tracker.start_scan()
 
     results = []
     glob_pattern = "**" if recursive else "*"
@@ -72,8 +83,7 @@ def _scan_for_roms(progress_tracker: HashProgressTracker,
         logging.debug("Scan found rom file \"%s\".", file)
         results.append(file)
     
-    progress_tracker.scan_overall_progress.advance()
-    progress_tracker.scan_overall_progress.stop()
+    progress_tracker.complete_scan()
 
     return results
 
@@ -81,7 +91,7 @@ def _hash_files(progress_tracker: HashProgressTracker,
                 thread_count: int,
                 overwrite: bool,
                 files: list[pathlib.Path]):
-    progress_tracker.hash_overall_progress.start(visible=True, total=len(files))
+    progress_tracker.start_hash(len(files))
 
     with ThreadPoolExecutor(max_workers=thread_count) as executor:
         futures = []
@@ -90,7 +100,7 @@ def _hash_files(progress_tracker: HashProgressTracker,
             futures.append(executor.submit(sha1_hash_file, file, file_progress, force_regenerate=overwrite))
 
         for future in as_completed(futures):
-            progress_tracker.hash_overall_progress.advance()
             future.result()
+            progress_tracker.advance_hash()
 
-    progress_tracker.hash_overall_progress.stop()
+    progress_tracker.stop_hash()

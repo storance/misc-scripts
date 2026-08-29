@@ -73,6 +73,79 @@ class SyncProgressTracker:
                                                      filename=file.name)
         return ProgressWrapper(self.copy_files_progress, task_id)
 
+    def start_plan(self):
+        self.plan_overall_progress.start(visible=True)
+    
+    def complete_plan(self):
+        self.plan_overall_progress.advance()
+        self.plan_overall_progress.stop()
+
+    def fail_plan(self):
+        self.plan_overall_progress.stop()
+        self.plan_overall_progress.update(failed=True)
+
+    def start_hash(self, total: int):
+        self.hash_overall_progress.start(visible=True, total=total)
+
+    def advance_hash(self):
+        self.hash_overall_progress.advance()
+
+    def stop_hash(self):
+        self.hash_overall_progress.stop()
+
+    def fail_hash(self):
+        self.hash_overall_progress.stop()
+        self.hash_overall_progress.update(failed=True)
+
+    def execute_plan(self, total_delete_tasks, total_rename_tasks, total_copy_tasks):
+        if total_delete_tasks:
+            self.delete_overall_progress.update(visible=True, total=total_delete_tasks)
+
+        if total_rename_tasks:
+            self.rename_overall_progress.update(visible=True, total=total_rename_tasks)
+
+        if total_copy_tasks:
+            self.copy_overall_progress.update(visible=True, total=total_copy_tasks)
+
+    def start_delete(self):
+        self.delete_overall_progress.start()
+
+    def advance_delete(self):
+        self.delete_overall_progress.advance()
+
+    def stop_delete(self):
+        self.delete_overall_progress.stop()
+
+    def fail_delete(self):
+        self.delete_overall_progress.stop()
+        self.delete_overall_progress.update(failed=True)
+
+    def start_rename(self):
+        self.rename_overall_progress.start()
+
+    def advance_rename(self):
+        self.rename_overall_progress.advance()
+
+    def stop_rename(self):
+        self.rename_overall_progress.stop()
+
+    def fail_rename(self):
+        self.rename_overall_progress.stop()
+        self.rename_overall_progress.update(failed=True)
+
+    def start_copy(self):
+        self.copy_overall_progress.start()
+
+    def advance_copy(self):
+        self.copy_overall_progress.advance()
+
+    def stop_copy(self):
+        self.copy_overall_progress.stop()
+
+    def fail_copy(self):
+        self.copy_overall_progress.stop()
+        self.copy_overall_progress.update(failed=True)
+
     def stop(self):
         self.plan_overall_progress.progress.stop()
         self.hash_overall_progress.progress.stop()

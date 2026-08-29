@@ -29,6 +29,43 @@ class RenameProgressTracker:
                                                     filename=file.name)
         return ProgressWrapper(self.hash_files_progress, task_id)
 
+    def start_scan(self):
+        self.scan_overall_progress.start(visible=True)
+
+    def complete_scan(self):
+        self.scan_overall_progress.advance()
+        self.scan_overall_progress.stop()
+
+    def fail_scan(self):
+        self.scan_overall_progress.stop()
+        self.scan_overall_progress.update(failed=True)
+
+    def start_hash(self, total: int):
+        self.hash_overall_progress.start(visible=True, total=total)
+
+    def advance_hash(self):
+        self.hash_overall_progress.advance()
+
+    def stop_hash(self):
+        self.hash_overall_progress.stop()
+
+    def fail_hash(self):
+        self.hash_overall_progress.stop()
+        self.hash_overall_progress.update(failed=True)
+
+    def start_rename(self, total: int):
+        self.rename_overall_progress.start(visible=True, total=total)
+
+    def advance_rename(self):
+        self.rename_overall_progress.advance()
+
+    def stop_rename(self):
+        self.rename_overall_progress.stop()
+
+    def fail_rename(self):
+        self.rename_overall_progress.stop()
+        self.rename_overall_progress.update(failed=True)
+
     def stop(self):
         self.scan_overall_progress.progress.stop()
         self.hash_overall_progress.progress.stop()

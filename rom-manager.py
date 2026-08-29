@@ -11,6 +11,7 @@ from rom_manager.sync import configure_sync_parser
 from rom_manager.rename import configure_rename_parser
 from rom_manager.hash import configure_hash_parser
 from rom_manager.compress import configure_compress_parser
+from rom_manager.trim import configure_trim_parser
 
 
 class LogHighlighter(RegexHighlighter):
@@ -48,8 +49,11 @@ def main():
     compress_parser = subparsers.add_parser('compress', help='Compresses rom files to a specified format')
     configure_compress_parser(compress_parser)
 
+    trim_parser = subparsers.add_parser('trim', help='Trims or untrims 3ds and NDS rom files')
+    configure_trim_parser(trim_parser)
+
+
     # TODO: add verify command that checks roms against dat files (basically first part of rename)
-    # TODO: implement pure python trim/untrim for 3ds and nds roms
 
     args = parser.parse_args()
 

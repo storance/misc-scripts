@@ -2,7 +2,7 @@ from .pattern import Pattern, PatternType
 from .metadata import Metadata, RomFolder
 from .profiles import Profile, ProfileRomFolderConfig, FolderPerGameConfig, GameNameExtractorConfig
 from .common import ParseError, Location, normalize_unicode, read_yaml_file, generate_random_string
-from .hash_util import sha1_hash_file, remove_sha1_cache, rename_file, SHA1_EXT
+from .file_util import sha1_hash_file, remove_sha1_cache, rename_file, copy_file, delete_quietly, SHA1_EXT
 from .dat import DatFile, Header, Game, Rom, load_rom_dat
 
 __all__ = [
@@ -26,6 +26,8 @@ __all__ = [
     "sha1_hash_file",
     "remove_sha1_cache",
     "rename_file",
+    "copy_file",
+    "delete_quietly",
     "SHA1_EXT",
     "load_rom_dat"
 ]
