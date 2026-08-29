@@ -28,13 +28,18 @@ def sha1_hash_file(file: pathlib.Path,
 
     try:
         digest = hashlib.sha1()
-        with open(file, 'rb') as f:
+        f = open(file, 'rb')
+        try:
             while True:
                 chunk = f.read(chunk_size)
                 if not chunk:
                     break
                 digest.update(chunk)
                 progress.advance(len(chunk))
+        except:
+            logging.exception("Unexpected error hashing file")
+        finally:
+            f.close()
 
         sha1 = digest.hexdigest().casefold()
         if use_cache:
@@ -48,7 +53,7 @@ def sha1_hash_file(file: pathlib.Path,
     except Exception as e:
         progress.stop()
         progress.update(failed=True)
-        logging.error("Failed to hash file \"%s\": %s", file, str(e))
+        logging.exception("Failed to hash file \"%s\": %s", file, str(e))
         return None
 
 

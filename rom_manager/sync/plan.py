@@ -321,8 +321,8 @@ def _filter_files_to_delete(dst_root_path: pathlib.Path,
         if file not in rename_task_srcs and file not in copy_task_dests:
             logging.debug("Adding file \"%s\" to delete tasks as it does not exist in a source rom folder.", file)
             files_to_delete.append(file)
-
-        keep_dirs.update(_list_dirs_from_path(file.parent, dst_root_path))
+        else:
+            keep_dirs.update(_list_dirs_from_path(file.parent, dst_root_path))
 
     dirs_to_delete = set()
     for file in files_to_delete:
@@ -330,7 +330,7 @@ def _filter_files_to_delete(dst_root_path: pathlib.Path,
             if dir not in keep_dirs:
                 logging.debug(
                     "Adding directory \"%s\" to delete tasks as all it's children are marked for deletion.", dir)
-                dirs_to_delete.add(dir)
+                dirs_to_delete.add(dst_root_path / dir)
 
     # reverse sorting the dirs ends up listing the long paths first which allows us to delete subdirs first
     return (files_to_delete, sorted(dirs_to_delete, reverse=True))

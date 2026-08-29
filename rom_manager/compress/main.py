@@ -78,7 +78,7 @@ def compress_roms(console: Console, args: argparse.Namespace):
             files_to_compress = _scan_files(progress_tracker, args.input_directory, output_directory, args.format)
         except Exception as e:
             progress_tracker.fail_scan()
-            logging.error("Failed to scan \"%s\" input path: %s",  args.input_directory, str(e))
+            logging.error("Failed to scan \"%s\": %s",  args.input_directory, str(e))
             sys.exit(1)
 
         if not files_to_compress:

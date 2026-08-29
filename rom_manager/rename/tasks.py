@@ -3,8 +3,7 @@ import logging
 from dataclasses import dataclass
 
 from .dat import GameRomPair
-from .cue import rename_bin_files_in_cue
-from .. import Game, Rom, rename_file
+from .. import Game, Rom, rename_file, rename_bin_files_in_cue
 
 
 @dataclass

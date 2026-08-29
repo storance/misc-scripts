@@ -148,20 +148,20 @@ def _execute_plan(progress_tracker: SyncProgressTracker,
     if plan.delete_dir_tasks or plan.delete_file_tasks:
         progress_tracker.start_delete()
         try:
-            for dir in plan.delete_dir_tasks:
-                logging.info("Deleting directory \"%s\".", dir)
-                try:
-                    dir.rmdir()
-                except OSError as e:
-                    logging.error("Failed to delete directory \"%s\": %s.", dir, str(e))
-                progress_tracker.advance_delete()
-
             for file in plan.delete_file_tasks:
                 logging.info("Deleting file \"%s\".", file)
                 try:
                     file.unlink()
                 except OSError as e:
                     logging.error("Failed to delete file \"%s\": %s.", file, str(e))
+                progress_tracker.advance_delete()
+
+            for dir in plan.delete_dir_tasks:
+                logging.info("Deleting directory \"%s\".", dir)
+                try:
+                    dir.rmdir()
+                except OSError as e:
+                    logging.error("Failed to delete directory \"%s\": %s.", dir, str(e))
                 progress_tracker.advance_delete()
         except Exception as e:
             progress_tracker.fail_delete()

@@ -2,17 +2,23 @@ import sys
 import argparse
 import pathlib
 import logging
+from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from rich.console import Console
 from rich.live import Live
 
-from .dat import load_dat_files
-from .progress import RenameProgressTracker
-from .tasks import CueFile, SyncFolder, build_rename_tasks
+from .dat import GameRomPair, load_dat_files
+from .progress import VerifyProgressTracker
 from .. import sha1_hash_file, list_bin_files_from_cue
 
 
-def configure_rename_parser(parser: argparse.ArgumentParser):
+@dataclass
+class CueFile:
+    cue_file: pathlib.Path
+    bin_files: list[pathlib.Path]
+
+
+def configure_verify_parser(parser: argparse.ArgumentParser):
     parser.add_argument('-d', '--dat-file',
                         required=True,
                         nargs="+",
@@ -22,15 +28,6 @@ def configure_rename_parser(parser: argparse.ArgumentParser):
                         required=True,
                         nargs="+",
                         help='Extension of the rom files too look at.  For example: iso, chd, cue.  For bin/cue files use cue as the extension.')
-    parser.add_argument('-s', '--sync-folder',
-                        default=[],
-                        nargs=2,
-                        metavar=('PATH', 'EXT'),
-                        action='append',
-                        help='Syncs the filenames in the folder with the given extension. This is useful when renaming .iso files and you want to keep the .chd file in sync, for example.')
-    parser.add_argument('-D', '--dry-run',
-                        action="store_true",
-                        help="Run in dry-run mode.")
     parser.add_argument('-r', '--recursive',
                         action='store_true',
                         help='Recursively search sub-directories for rom files to rename.')
@@ -40,11 +37,11 @@ def configure_rename_parser(parser: argparse.ArgumentParser):
                         help='Number of threads to use to hash files in parallel.')
     parser.add_argument('input_directory',
                         help='Input directory containing the roms to rename.')
-    parser.set_defaults(action=rename_roms, log_file='rename.log')
+    parser.set_defaults(action=verify_roms, log_file='verify.log')
 
 
-def rename_roms(console: Console, args: argparse.Namespace):
-    progress_tracker = RenameProgressTracker(console)
+def verify_roms(console: Console, args: argparse.Namespace):
+    progress_tracker = VerifyProgressTracker(console)
 
     with Live(progress_tracker.progress_group(), console=console):
         input_directory = pathlib.Path(args.input_directory)
@@ -54,18 +51,12 @@ def rename_roms(console: Console, args: argparse.Namespace):
 
         games_by_hash = load_dat_files(args.dat_file)
 
-        sync_folders = [SyncFolder(pathlib.Path(path), _normalize_ext(ext)) for path, ext in args.sync_folder]
-        for sync_folder in sync_folders:
-            if sync_folder.ext == '.cue':
-                logging.error("Error: Syncing cue files is not supported.")
-                sys.exit(1)
-
         file_suffixes = [_normalize_ext(ext) for ext in args.extension]
         try:
             scan_result = _scan_for_roms(progress_tracker, input_directory, args.recursive, file_suffixes)
         except Exception as e:
             progress_tracker.fail_scan()
-            logging.error("Failed to scan \"%s\" input path: %s", input_directory, str(e))
+            logging.error("Failed to scan \"%s\": %s", input_directory, str(e))
             sys.exit(1)
 
         files_to_hash = []
@@ -85,35 +76,24 @@ def rename_roms(console: Console, args: argparse.Namespace):
             progress_tracker.fail_hash()
             logging.error("Failed to hash files: %s", str(e))
             sys.exit(1)
-        tasks = build_rename_tasks(scan_result, games_by_hash, hashes_by_path, sync_folders)
 
-        if not tasks:
-            logging.info("No rom files found to rename.")
-            return
-        
-        if args.dry_run:
-            for task in tasks:
-                task.dry_run()
-        else:
-            try:
-                progress_tracker.start_rename(len(tasks))
-                for task in tasks:
-                    task.execute()
-                    progress_tracker.advance_rename()
-                progress_tracker.stop_rename()
-            except Exception as e:
-                progress_tracker.fail_rename()
-                logging.error("Failed to rename files: %s", str(e))
-                sys.exit(1)
+        try:
+            if not _verify_rom_files(progress_tracker, scan_result, games_by_hash, hashes_by_path):
+                progress_tracker.fail_verify()
+        except Exception as e:
+            progress_tracker.fail_hash()
+            logging.error("Failed to verify files: %s", str(e))
+            sys.exit(1)
 
         progress_tracker.stop()
+
 
 def _normalize_ext(ext: str) -> str:
     ext = ext.casefold()
     return ext if ext[0] == '.' else f".{ext}"
 
 
-def _scan_for_roms(progress_tracker: RenameProgressTracker,
+def _scan_for_roms(progress_tracker: VerifyProgressTracker,
                    input_directory: pathlib.Path,
                    recursive: bool,
                    extensions: list[str]) -> list[pathlib.Path | CueFile]:
@@ -159,7 +139,7 @@ def _scan_for_roms(progress_tracker: RenameProgressTracker,
     return results
 
 
-def _hash_files(progress_tracker: RenameProgressTracker,
+def _hash_files(progress_tracker: VerifyProgressTracker,
                 thread_count: int,
                 files: list[pathlib.Path]) -> dict[pathlib.Path, str]:
     progress_tracker.start_hash(len(files))
@@ -181,3 +161,71 @@ def _hash_files(progress_tracker: RenameProgressTracker,
 
     progress_tracker.stop_hash()
     return hashes
+
+
+def _verify_rom_files(progress_tracker: VerifyProgressTracker,
+                      rom_files: list[pathlib.Path | CueFile],
+                      games_by_hash: dict[str, list[GameRomPair]],
+                      hashes_by_path: dict[pathlib.Path, str]) -> bool:
+    progress_tracker.start_verify(len(rom_files))
+
+    all_verified = True
+    for rom_file in rom_files:
+        if isinstance(rom_file, CueFile):
+            all_verified = all_verified and _verify_cue_file(rom_file, games_by_hash, hashes_by_path)
+        elif isinstance(rom_file, pathlib.Path):
+            all_verified = all_verified and _verify_single_rim(rom_file, games_by_hash, hashes_by_path)
+
+        progress_tracker.advance_verify()
+    progress_tracker.stop_verify()
+
+    return all_verified
+
+
+def _verify_single_rim(file: pathlib.Path,
+                       games_by_hash: dict[str, list[GameRomPair]],
+                       hashes_by_path: dict[pathlib.Path, str]) -> bool:
+    sha1 = hashes_by_path.get(file)
+
+    if sha1 is None:
+        logging.debug("Skipping \"%s\" as a sha1 was not calculated for it.", file)
+        return True
+
+    if sha1 not in games_by_hash:
+        logging.error("File \"%s\" with sha1 hash %s does not match any game.", file, sha1)
+        return False
+
+    game_and_roms = games_by_hash[sha1]
+    logging.debug("File \"%s\" with sha1 hash %s matches game %s", file, sha1, game_and_roms[0].game.name)
+    return True
+
+
+def _verify_cue_file(rom: CueFile,
+                     games_by_hash: dict[str, list[GameRomPair]],
+                     hashes_by_path: dict[pathlib.Path, str]) -> bool:
+    bin_file_hashes = {
+        bin_file: hashes_by_path.get(bin_file)
+        for bin_file in rom.bin_files
+    }
+
+    game = None
+    for bin_file, sha1 in bin_file_hashes.items():
+        if sha1 is None:
+            logging.debug("Skipping \"%s\" as a sha1 was not calculated for it.", bin_file)
+            continue
+
+        if sha1 not in games_by_hash:
+            logging.error("File \"%s\" with sha1 hash %s does not match any game.", bin_file, sha1)
+            return False
+
+        games = games_by_hash[sha1]
+        if len(games) == 1:
+            game = games[0].game
+            break
+        elif game is None:
+            game = games[0].game
+
+    logging.debug("File \"%s\" with sha1 hash %s matches game %s.",
+                 rom.cue_file, "unknown" if game is None else game.name)
+
+    return True

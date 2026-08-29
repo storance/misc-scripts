@@ -71,7 +71,7 @@ def trim_roms(console: Console, args: argparse.Namespace):
                                            output_directory, args.recursive, not args.untrim)
         except Exception as e:
             progress_tracker.fail_scan()
-            logging.error("Failed to scan \"%s\" input path: %s",  args.input_path, str(e))
+            logging.error("Failed to scan \"%s\": %s",  args.input_path, str(e))
             sys.exit(1)
 
         if len(files_to_trim) == 0:

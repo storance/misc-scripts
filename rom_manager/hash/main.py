@@ -21,7 +21,7 @@ def configure_hash_parser(parser: argparse.ArgumentParser):
     parser.add_argument('-o', '--overwrite',
                         action="store_true",
                         help="Overwrite any existing .sha1 file.")
-    parser.add_argument('-t', '--thread',
+    parser.add_argument('-t', '--threads',
                         type=int,
                         default=3,
                         help="Number of threads to use for hashing files.")
@@ -45,7 +45,7 @@ def hash_roms(console: Console, args: argparse.Namespace):
             rom_files = _scan_for_roms(progress_tracker, input_directory, args.recursive, extensions)
         except Exception as e:
             progress_tracker.fail_scan()
-            logging.error("Failed to scan \"%s\" input path: %s", input_directory, str(e))
+            logging.error("Failed to scan \"%s\": %s", input_directory, str(e))
             sys.exit(1)
 
         if len(rom_files) == 0:
