@@ -89,13 +89,13 @@ def _scan_source(src_path: pathlib.Path,
             logging.warning(f"Source rom folder \"{scan_dir}\" does not exist or is not a directory. Skipping.")
             continue
 
-        glob_pattern = "**" if rom_folder_config.rom_folder.include_subfolders else "*"
+        glob_pattern = "**" if rom_folder_config.rom_folder.recursive else "*"
 
         for file in scan_dir.glob(glob_pattern):
             if not file.is_file():
                 continue
 
-            if not any(file.name.endswith(ext) for ext in rom_folder_config.rom_folder.extensions):
+            if not rom_folder_config.rom_folder.is_included(file):
                 logging.debug("Skipping file \"%s\" as it does not end with a desired extension.", file)
                 continue
 

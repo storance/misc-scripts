@@ -27,7 +27,7 @@ class Metadata:
 class RomFolder:
     path: str
     name: str
-    include_subfolders: bool
+    recursive: bool
     extensions: list[str]
     excludes: list[Pattern]
 
@@ -37,16 +37,16 @@ class RomFolder:
                            required=True, expected_types=YamlType.STRING)
         name = extract_key(yaml_value, 'name', location,
                            required=True, expected_types=YamlType.STRING)
-        include_subfolders = extract_key(yaml_value, 'include_subfolders', location,
-                                         default=False, expected_types=YamlType.BOOL)
-        extensions = extract_key(yaml_value, 'extensions', location,
-                                 required=True, expected_types=YamlType.SEQ)
+        recursive = extract_key(yaml_value, 'recursive', location,
+                                default=False, expected_types=YamlType.BOOL)
+        extensions = _parse_extensions(*extract_key_and_location(yaml_value, 'extensions', location,
+                                                                 required=True, expected_types=YamlType.SEQ))
         excludes, excludes_loc = extract_key_and_location(yaml_value, 'excludes', location,
                                                           default=[], expected_types=YamlType.SEQ)
 
         return RomFolder(path,
                          name,
-                         include_subfolders,
+                         recursive,
                          extensions,
                          Pattern.from_yaml_list(excludes, excludes_loc))
 
@@ -69,5 +69,28 @@ class RomFolder:
 
         return rom_folders
 
+    def is_included(self, relative_path: pathlib.Path) -> bool:
+        name = relative_path.name.casefold()
+
+        return any(name.endswith(ext) for ext in self.extensions)
+
     def is_excluded(self, relative_path: pathlib.Path) -> bool:
         return any(exclude.matches(relative_path) for exclude in self.excludes)
+
+
+def _parse_extensions(yaml_values: list, location: Location) -> list[str]:
+    if len(yaml_values) == 0:
+        raise ParseError("At least one extension must be specified.", location)
+
+    exts = []
+
+    for ext, ext_loc in enumerate_seq(yaml_values, location):
+        if not ext:
+            raise ParseError(f"Empty or null extensions are not allowed", ext_loc)
+
+        if ext[0] != '.':
+            raise ParseError(f"Extension {ext} does not start with a leading dot (.)", ext_loc)
+
+        exts.append(ext.casefold())
+
+    return exts
