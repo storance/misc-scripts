@@ -13,7 +13,7 @@ def sha1_hash_file(file: pathlib.Path,
                    use_cache: bool = True,
                    force_regenerate: bool = False,
                    chunk_size=4*1024) -> str | None:
-    logging.debug("Starting hashing of \"%s\"", file)
+    logging.debug("Hashing \"%s\" using sha1.", file)
     total_size = file.stat().st_size
 
     progress.start(visible=True)
@@ -23,7 +23,7 @@ def sha1_hash_file(file: pathlib.Path,
         progress.advance(total_size)
         progress.stop(visible=False)
         sha1 = _read_sha1_file(sha1_file)
-        logging.debug("Hashed \"%s\" to SHA1 %s using cached value.", file, sha1)
+        logging.debug("Hashed \"%s\" to sha1 %s using cached value.", file, sha1)
         return sha1
 
     try:
@@ -43,12 +43,12 @@ def sha1_hash_file(file: pathlib.Path,
 
         progress.stop(visible=False)
 
-        logging.debug("Hashed \"%s\" to SHA1 %s.", file, sha1)
+        logging.debug("Hashed \"%s\" to sha1 %s.", file, sha1)
         return sha1
     except Exception as e:
         progress.stop()
         progress.update(failed=True)
-        logging.exception("Failed to hash file \"%s\": %s", file, str(e))
+        logging.error("Failed to hash file \"%s\": %s", file, str(e))
         return None
 
 
@@ -103,9 +103,9 @@ def copy_file(progress: ProgressWrapper,
         progress.stop(visible=False)
         return True
     except Exception as e:
-        logging.error("Failed to copy file \"%s\" to \"%s\": %s", src_path, dst_path, str(e))
         progress.stop()
         progress.update(failed=True)
+        logging.error("Failed to copy file \"%s\" to \"%s\": %s", src_path, dst_path, str(e))
 
         delete_quietly(tmp_file)
         return False

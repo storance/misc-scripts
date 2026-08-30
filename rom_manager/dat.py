@@ -74,7 +74,7 @@ def _parse_rom(rom_element: ET.Element[str]) -> Rom:
     crc = rom_element.get('crc')
     md5 = _normalize_hash(rom_element.get('md5'))
     sha1 = _normalize_hash(rom_element.get('sha1'))
-    sha256 = _normalize_hash(rom_element.get('256'))
+    sha256 = _normalize_hash(rom_element.get('sha256'))
 
     if name is None:
         raise ValueError("Missing name element on rom")

@@ -144,6 +144,7 @@ def _hash_files(progress_tracker: VerifyProgressTracker,
                 files: list[pathlib.Path]) -> dict[pathlib.Path, str]:
     progress_tracker.start_hash(len(files))
 
+    hashes = {}
     with ThreadPoolExecutor(max_workers=thread_count) as executor:
         futures_to_path = {}
         for file in files:
@@ -151,7 +152,6 @@ def _hash_files(progress_tracker: VerifyProgressTracker,
             future = executor.submit(sha1_hash_file, file, file_progress)
             futures_to_path[future] = file
 
-        hashes = {}
         for future in as_completed(futures_to_path):
             progress_tracker.hash_overall_progress.advance()
             file = futures_to_path[future]
@@ -226,6 +226,6 @@ def _verify_cue_file(rom: CueFile,
             game = games[0].game
 
     logging.debug("File \"%s\" with sha1 hash %s matches game %s.",
-                 rom.cue_file, "unknown" if game is None else game.name)
+                  rom.cue_file, "unknown" if game is None else game.name)
 
     return True

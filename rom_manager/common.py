@@ -160,7 +160,7 @@ def extract_type(value: Any) -> YamlType:
     elif isinstance(value, datetime.datetime):
         return YamlType.DATETIME
     else:
-        raise ValueError(f"Unknown Type: f{type(value)}")
+        raise ValueError(f"Unknown Type: {type(value)}")
 
 
 def validate_type(value: Any, expected_types: YamlType | list[YamlType], location: Location):

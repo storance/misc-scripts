@@ -10,7 +10,6 @@ from rich.progress import (
     TextColumn,
     BarColumn,
     SpinnerColumn,
-    TextColumn,
     DownloadColumn,
     MofNCompleteColumn,
     TaskProgressColumn,
