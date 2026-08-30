@@ -103,7 +103,7 @@ def copy_file(progress: ProgressWrapper,
         progress.stop(visible=False)
         return True
     except Exception as e:
-        logging.error("Failed to copy file \"%s\" to \"%s\": {e}", src_path, dst_path, str(e))
+        logging.error("Failed to copy file \"%s\" to \"%s\": %s", src_path, dst_path, str(e))
         progress.stop()
         progress.update(failed=True)
 

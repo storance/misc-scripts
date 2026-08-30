@@ -122,7 +122,7 @@ class FileNameColumn(ProgressColumn):
         indent = ' ' * self.indent
 
         if failed:
-            return Text.from_markup(f"{indent}[red]✗ {prefix}{filename}")
+            return Text.from_markup(f"{indent}[red]✗ [magenta]{prefix}{filename}")
         else:
             return Text.from_markup(f"{indent}[magenta]{prefix}{filename}")
 
