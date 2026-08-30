@@ -48,7 +48,7 @@ def create_plan(progress_tracker: SyncProgressTracker,
     progress_tracker.plan_overall_progress.start(visible=True)
 
     copy_candidates = _scan_source(src_path, dst_path, profile, dot_files_mode)
-    destination_files = _scan_dir(dst_path)
+    destination_files = _scan_dir(dst_path) if delete else []
 
     rename_tasks = []
     hashes = {}
