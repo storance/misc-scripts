@@ -90,7 +90,8 @@ class RenameCueTask(RenameTask):
             logging.info("DRY RUN: Updating cue file \"%s\" with renamed bin files.", self.new_cue_file)
 
 
-def build_rename_tasks(rom_files: list[pathlib.Path | CueFile],
+def build_rename_tasks(input_directory: pathlib.Path,
+                       rom_files: list[pathlib.Path | CueFile],
                        games_by_hash: dict[str, list[GameRomPair]],
                        hashes_by_path: dict[pathlib.Path, str],
                        sync_folders: list[SyncFolder]) -> list[RenameTask]:
@@ -98,9 +99,9 @@ def build_rename_tasks(rom_files: list[pathlib.Path | CueFile],
     for rom_file in rom_files:
         tasks = None
         if isinstance(rom_file, CueFile):
-            tasks = _build_cue_rename_task(rom_file, games_by_hash, hashes_by_path, sync_folders)
+            tasks = _build_cue_rename_task(input_directory, rom_file, games_by_hash, hashes_by_path, sync_folders)
         elif isinstance(rom_file, pathlib.Path):
-            tasks = _build_single_rename_task(rom_file, games_by_hash, hashes_by_path, sync_folders)
+            tasks = _build_single_rename_task(input_directory, rom_file, games_by_hash, hashes_by_path, sync_folders)
 
         if tasks is not None:
             results.extend(tasks)
@@ -108,7 +109,8 @@ def build_rename_tasks(rom_files: list[pathlib.Path | CueFile],
     return results
 
 
-def _build_single_rename_task(file: pathlib.Path,
+def _build_single_rename_task(input_directory: pathlib.Path,
+                              file: pathlib.Path,
                               games_by_hash: dict[str, list[GameRomPair]],
                               hashes_by_path: dict[pathlib.Path, str],
                               sync_folders: list[SyncFolder]) -> list[RenameTask] | None:
@@ -134,11 +136,12 @@ def _build_single_rename_task(file: pathlib.Path,
 
     new_name = file.with_name(rom.name)
     tasks: list[RenameTask] = [RenameSingleRomTask(file, new_name)]
-    tasks.extend(_sync_rename(file.name, new_name.name, sync_folders))
+    tasks.extend(_sync_rename(file.relative_to(input_directory), new_name.name, sync_folders))
     return tasks
 
 
-def _build_cue_rename_task(rom: CueFile,
+def _build_cue_rename_task(input_directory: pathlib.Path,
+                           rom: CueFile,
                            games_by_hash: dict[str, list[GameRomPair]],
                            hashes_by_path: dict[pathlib.Path, str],
                            sync_folders: list[SyncFolder]):
@@ -194,7 +197,7 @@ def _build_cue_rename_task(rom: CueFile,
     tasks: list[RenameTask] = [
         RenameCueTask(rom.cue_file, new_cue_file, rename_mapping)
     ]
-    tasks.extend(_sync_rename(rom.cue_file.name, new_cue_file.name, sync_folders))
+    tasks.extend(_sync_rename(rom.cue_file.relative_to(input_directory), new_cue_file.name, sync_folders))
     return tasks
 
 
@@ -206,10 +209,12 @@ def _find_rom(sha1: str, game: Game) -> Rom | None:
     return None
 
 
-def _sync_rename(old_name: str, new_name: str, sync_folders: list[SyncFolder]):
+def _sync_rename(rom_file: pathlib.Path,
+                 new_name: str,
+                 sync_folders: list[SyncFolder]) -> list[RenameTask]:
     results = []
     for sync_folder in sync_folders:
-        sync_file = (sync_folder.path / old_name).with_suffix(sync_folder.ext)
+        sync_file = (sync_folder.path / rom_file).with_suffix(sync_folder.ext)
         if not sync_file.exists():
             continue
 

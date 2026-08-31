@@ -85,7 +85,7 @@ def rename_roms(console: Console, args: argparse.Namespace):
             progress_tracker.fail_hash()
             logging.error("Failed to hash files: %s", str(e))
             sys.exit(1)
-        tasks = build_rename_tasks(scan_result, games_by_hash, hashes_by_path, sync_folders)
+        tasks = build_rename_tasks(input_directory, scan_result, games_by_hash, hashes_by_path, sync_folders)
 
         if not tasks:
             logging.info("No rom files found to rename.")
