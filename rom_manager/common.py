@@ -9,9 +9,8 @@ from typing import Any
 from enum import StrEnum
 from collections.abc import Generator
 from dataclasses import dataclass
-from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
-from rich.console import Console
+
 
 class ParseError(Exception):
     def __init__(self, message: str, location: Location):
@@ -176,25 +175,31 @@ def validate_type(value: Any, expected_types: YamlType | list[YamlType], locatio
             raise ParseError(
                 f"Invalid type {actual_type} for {location.field}.  Expected type to be one of: {', '.join(expected_types)}.", location)
 
-def read_yaml_file(console: Console, file: pathlib.Path) -> tuple[dict, Location]:
-    try:
-        yaml_parser = YAML(typ='rt')
-        data = yaml_parser.load(file)
-        if isinstance(data, CommentedMap):
-            location = Location(None, file, data.lc.line+1)
-        else:
-            location = Location(None, file, None)
-
-        return (data, location)
-    except ParseError as e:
-        console.log(f"[red]ERROR[/red] {e}\n  in {e.location}")
-        sys.exit(1)
-    except Exception as e:
-        console.log(f"[red]ERROR[/red] Failed to read [magenta]\"{file}\"[/magenta]: {e}")
-        sys.exit(1)
 
 def generate_random_string(size: int):
     return ''.join(random.choices(string.ascii_lowercase, k=size))
 
+
 def is_power_of_2(n: int) -> bool:
     return n > 0 and (n & (n-1)) == 0
+
+
+def replace_suffix(file: pathlib.Path, new_suffix: str) -> pathlib.Path:
+    """Returns a new pathlib.Path object with the suffix replaced by new_suffix. If the file has multiple suffixes, all of them will be replaced by new_suffix."""
+    if not new_suffix.startswith('.'):
+        new_suffix = '.' + new_suffix
+
+    all_exts = ''.join(file.suffixes)
+
+    return file.with_name(file.name.removesuffix(all_exts) + new_suffix)
+
+def replace_stem(file: pathlib.Path, new_stem: str) -> pathlib.Path:
+    """Returns a new pathlib.Path object with the stem replaced by new_stem. If the file has multiple suffixes, they will be preserved."""
+
+    all_exts = ''.join(file.suffixes)
+    return file.with_name(new_stem + all_exts)
+
+def get_stem(file: pathlib.Path) -> str:
+    """Returns the stem of the file, which is the filename without any suffixes.  This handles files with multiple suffixes, such as .tar.gz, and returns the filename without any of the suffixes."""
+    all_exts = ''.join(file.suffixes)
+    return file.name.removesuffix(all_exts)

@@ -1,11 +1,12 @@
 import re
 import pathlib
+from ruamel.yaml import YAML
+from dataclasses import dataclass, field
 from typing import Any
 from .pattern import Pattern
 from .common import ParseError, Location, YamlType, extract_key, extract_key_and_location, \
     enumerate_seq, enumerate_mapping, validate_type, compile_regex
-from .metadata import Metadata, RomFolder
-from dataclasses import dataclass, field
+from .metadata import Metadata, RomSet
 
 
 DEFAULT_GAME_NAME_EXTRACTOR = re.compile(r'^(.+?)(?:\s*\(.+\)\s*)*\..+$', re.IGNORECASE)
@@ -15,9 +16,17 @@ DEFAULT_REPLACEMENT = r'\1'
 @dataclass
 class Profile:
     root_folder: pathlib.Path | None
-    rom_folders: list[ProfileRomFolderConfig]
+    rom_sets: list[ProfileRomSetConfig]
     delete_excludes: list[Pattern]
     _interested_exts: set[str] | None = field(default=None, init=False)
+
+    @classmethod
+    def load_from_file(cls, file: pathlib.Path, metadata: Metadata) -> Profile:
+        yaml_parser = YAML(typ='rt')
+        data = yaml_parser.load(file)
+        location = Location(None, file, data.lc.line+1)
+
+        return cls.from_yaml(data, location, metadata)
 
     @staticmethod
     def from_yaml(yaml_value: Any, location: Location, metadata: Metadata) -> Profile:
@@ -30,7 +39,7 @@ class Profile:
         raw_rom_folders, rom_folders_loc = extract_key_and_location(yaml_value, 'rom_folders', location,
                                                                     required=True,
                                                                     expected_types=YamlType.SEQ)
-        rom_folders = [ProfileRomFolderConfig.from_yaml(rom_folder, loc, root_folder, metadata)
+        rom_folders = [ProfileRomSetConfig.from_yaml(rom_folder, loc, root_folder, metadata)
                        for rom_folder, loc in enumerate_seq(raw_rom_folders, rom_folders_loc)]
 
         delete_excludes, delete_excludes_loc = extract_key_and_location(yaml_value, 'delete_excludes', location,
@@ -42,8 +51,8 @@ class Profile:
     def interested_exts(self) -> set[str]:
         if self._interested_exts is None:
             self._interested_exts = set()
-            for rfc in self.rom_folders:
-                self._interested_exts.update(rfc.rom_folder.extensions)
+            for rfc in self.rom_sets:
+                self._interested_exts.update(rfc.rom_set.extensions)
 
         return self._interested_exts
 
@@ -53,13 +62,13 @@ class Profile:
     def is_include_for_delete(self, file: pathlib.Path) -> bool:
         if not self.is_interested_ext(file):
             return False
-        
+
         return not any(exclude.matches(file) for exclude in self.delete_excludes)
 
 
 @dataclass(frozen=True)
-class ProfileRomFolderConfig:
-    rom_folder: RomFolder
+class ProfileRomSetConfig:
+    rom_set: RomSet
     destination: pathlib.Path
     includes: list[Pattern]
     excludes: list[Pattern]
@@ -70,16 +79,16 @@ class ProfileRomFolderConfig:
     def from_yaml(yaml_value: dict,
                   location: Location,
                   root_folder: pathlib.Path | None,
-                  metadata: Metadata) -> ProfileRomFolderConfig:
+                  metadata: Metadata) -> ProfileRomSetConfig:
         validate_type(yaml_value, YamlType.MAPPING, location)
 
         name, name_loc = extract_key_and_location(yaml_value, 'name', location,
                                                   required=True,
                                                   expected_types=YamlType.STRING)
-        rom_folder = metadata.find_rom_folder(name)
-        if rom_folder is None:
+        rom_set = metadata.find_rom_set(name)
+        if rom_set is None:
             raise ParseError(
-                f"A rom folder with the name '{name}' does not exist in the metadata.yml", name_loc)
+                f"A rom set with the name '{name}' does not exist in the metadata.yml", name_loc)
 
         destination = extract_key(yaml_value, 'destination', location, expected_types=YamlType.STRING)
         includes, includes_loc = extract_key_and_location(yaml_value, 'includes', location,
@@ -97,12 +106,12 @@ class ProfileRomFolderConfig:
 
         flatten = extract_key(yaml_value, 'flatten', location, default=False, expected_types=YamlType.BOOL)
 
-        return ProfileRomFolderConfig(rom_folder,
-                                      _build_destination(rom_folder, root_folder, destination),
-                                      Pattern.from_yaml_list(includes, includes_loc),
-                                      Pattern.from_yaml_list(excludes, excludes_loc),
-                                      fpg_config,
-                                      flatten)
+        return ProfileRomSetConfig(rom_set,
+                                   _build_destination(rom_set, root_folder, destination),
+                                   Pattern.from_yaml_list(includes, includes_loc),
+                                   Pattern.from_yaml_list(excludes, excludes_loc),
+                                   fpg_config,
+                                   flatten)
 
     def get_relative_destination(self, src_relative_path: pathlib.Path) -> pathlib.Path:
         if self.flatten or self.folder_per_game.enabled:
@@ -197,7 +206,7 @@ class GameNameExtractorConfig:
         return self.pattern.sub(self.replacement, path.name)
 
 
-def _build_destination(rom_folder: RomFolder, root_folder: pathlib.Path | None, destination: str | None) -> pathlib.Path:
+def _build_destination(rom_folder: RomSet, root_folder: pathlib.Path | None, destination: str | None) -> pathlib.Path:
     if destination is None:
         destination = rom_folder.path
 

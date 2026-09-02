@@ -6,8 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from rich.console import Console
 from rich.live import Live
 
-
-from .. import Metadata, Profile, read_yaml_file, copy_file, rename_file
+from .. import Metadata, Profile, ParseError, copy_file, rename_file
 from .progress import SyncProgressTracker
 from .plan import Plan, create_plan
 from .common import OverwriteCheck, DotFilesMode
@@ -82,7 +81,14 @@ def sync_roms(console: Console, args: argparse.Namespace):
             logging.error("Source and destination paths can not be the same.")
             sys.exit(1)
 
-        metadata = Metadata.from_yaml(*read_yaml_file(console, metadata_file))
+        try:
+            metadata = Metadata.load_from_file(metadata_file)
+        except ParseError as e:
+            logging.error("%s\n  in %s", e, e.location)
+            sys.exit(1)
+        except Exception as e:
+            logging.error("Failed to read \"%s\": %s", metadata_file, str(e))
+            sys.exit(1)
 
         if args.profile_path:
             profile_path = pathlib.Path(args.profile_path)
@@ -95,7 +101,14 @@ def sync_roms(console: Console, args: argparse.Namespace):
                 logging.error("Profile \"%s\" does not exist in \"%s/profiles\".", args.profile, source_path)
                 sys.exit(1)
 
-        profile = Profile.from_yaml(*read_yaml_file(console, profile_path), metadata=metadata)
+        try:
+            profile = Profile.load_from_file(profile_path, metadata)
+        except ParseError as e:
+            logging.error("%s\n  in %s", e, e.location)
+            sys.exit(1)
+        except Exception as e:
+            logging.error("Failed to read \"%s\": %s", profile_path, str(e))
+            sys.exit(1)
 
         try:
             plan = create_plan(

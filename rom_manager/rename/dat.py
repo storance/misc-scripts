@@ -31,7 +31,7 @@ def load_dat_files(dat_files: list[pathlib.Path]) -> dict[str, list[GameRomPair]
 
                     games_by_sha1[rom.sha1].append(GameRomPair(game, rom))
         except Exception as e:
-            logging.exception("Failed to load dat file \"%s\": %s", file, str(e))
+            logging.error("Failed to load dat file \"%s\": %s", file, str(e))
             sys.exit(1)
 
     return games_by_sha1

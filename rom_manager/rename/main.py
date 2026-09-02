@@ -8,8 +8,9 @@ from rich.live import Live
 
 from .dat import load_dat_files
 from .progress import RenameProgressTracker
-from .tasks import CueFile, SyncFolder, build_rename_tasks
-from .. import sha1_hash_file, list_bin_files_from_cue
+from .tasks import build_rename_tasks
+from .common import CueFile, RenameTarget, TargetRomSet
+from .. import Metadata, ParseError, sha1_hash_file, list_bin_files_from_cue
 
 
 def configure_rename_parser(parser: argparse.ArgumentParser):
@@ -18,28 +19,21 @@ def configure_rename_parser(parser: argparse.ArgumentParser):
                         nargs="+",
                         type=pathlib.Path,
                         help='Location of the dat files containing rom hashes and filenames.')
-    parser.add_argument('-e', '--extension',
-                        required=True,
-                        nargs="+",
-                        help='Extension of the rom files too look at.  For example: iso, chd, cue.  For bin/cue files use cue as the extension.')
-    parser.add_argument('-s', '--sync-folder',
-                        default=[],
-                        nargs=2,
-                        metavar=('PATH', 'EXT'),
-                        action='append',
-                        help='Syncs the filenames in the folder with the given extension. This is useful when renaming .iso files and you want to keep the .chd file in sync, for example.')
+    parser.add_argument('-s', '--sync-group',
+                        action="store_true",
+                        help='Synchronizes the rename across all rom sets in the same group.')
     parser.add_argument('-D', '--dry-run',
                         action="store_true",
                         help="Run in dry-run mode.")
-    parser.add_argument('-r', '--recursive',
-                        action='store_true',
-                        help='Recursively search sub-directories for rom files to rename.')
     parser.add_argument('-t', '--threads',
                         type=int,
                         default=3,
                         help='Number of threads to use to hash files in parallel.')
+    parser.add_argument('-r', '--rom-sets', nargs="+", required=True, help='The name of the rom sets to rename.')
     parser.add_argument('input_directory',
-                        help='Input directory containing the roms to rename.')
+                        type=pathlib.Path,
+                        help='The directory where the roms exist. ' +
+                        'Expects a metadata.yml file to exist in this directory that defines the rom folder layout.')
     parser.set_defaults(action=rename_roms, log_file='rename.log')
 
 
@@ -47,33 +41,42 @@ def rename_roms(console: Console, args: argparse.Namespace):
     progress_tracker = RenameProgressTracker(console)
 
     with Live(progress_tracker.progress_group(), console=console):
-        input_directory = pathlib.Path(args.input_directory)
-        if not input_directory.exists() or not input_directory.is_dir():
-            logging.error("Input directory path \"%s\" does not exist or is not a directory.", input_directory)
+        if not args.input_directory.exists() or not args.input_directory.is_dir():
+            logging.error("Input directory path \"%s\" does not exist or is not a directory.", args.input_directory)
+            sys.exit(1)
+
+        metadata_file = args.input_directory / "metadata.yml"
+        if not metadata_file.exists():
+            logging.error("metadata.yml does not exist in \"%s\".", args.input_directory)
             sys.exit(1)
 
         games_by_hash = load_dat_files(args.dat_file)
 
-        sync_folders = [SyncFolder(pathlib.Path(path), _normalize_ext(ext)) for path, ext in args.sync_folder]
-        for sync_folder in sync_folders:
-            if sync_folder.ext == '.cue':
-                logging.error("Error: Syncing cue files is not supported.")
-                sys.exit(1)
-
-        file_suffixes = [_normalize_ext(ext) for ext in args.extension]
         try:
-            scan_result = _scan_for_roms(progress_tracker, input_directory, args.recursive, file_suffixes)
+            metadata = Metadata.load_from_file(metadata_file)
+        except ParseError as e:
+            logging.error("%s\n  in %s", e, e.location)
+            sys.exit(1)
+        except Exception as e:
+            logging.error("Failed to read \"%s\": %s", metadata_file, str(e))
+            sys.exit(1)
+
+        rom_sets = _get_target_rom_sets(args.rom_sets, metadata, args.sync_group)
+
+        try:
+            scan_result = _scan_for_roms(progress_tracker, args.input_directory, rom_sets)
         except Exception as e:
             progress_tracker.fail_scan()
-            logging.error("Failed to scan \"%s\" input path: %s", input_directory, str(e))
+            logging.error("Failed to scan \"%s\" input path: %s", args.input_directory, str(e))
             sys.exit(1)
 
         files_to_hash = []
         for rom_file in scan_result:
-            if isinstance(rom_file, pathlib.Path):
-                files_to_hash.append(rom_file)
-            elif isinstance(rom_file, CueFile):
-                files_to_hash.extend(rom_file.bin_files)
+            if rom_file.is_single_file():
+                files_to_hash.append(rom_file.as_single_file())
+            elif rom_file.is_cue_file():
+                cue_file = rom_file.as_cue_file()
+                files_to_hash.extend(cue_file.bin_files)
 
         if len(files_to_hash) == 0:
             logging.info("No rom files found.")
@@ -85,12 +88,12 @@ def rename_roms(console: Console, args: argparse.Namespace):
             progress_tracker.fail_hash()
             logging.error("Failed to hash files: %s", str(e))
             sys.exit(1)
-        tasks = build_rename_tasks(input_directory, scan_result, games_by_hash, hashes_by_path, sync_folders)
+        tasks = build_rename_tasks(args.input_directory, scan_result, games_by_hash, hashes_by_path)
 
         if not tasks:
             logging.info("No rom files found to rename.")
             return
-        
+
         if args.dry_run:
             for task in tasks:
                 task.dry_run()
@@ -108,51 +111,57 @@ def rename_roms(console: Console, args: argparse.Namespace):
 
         progress_tracker.stop()
 
-def _normalize_ext(ext: str) -> str:
-    ext = ext.casefold()
-    return ext if ext[0] == '.' else f".{ext}"
+
+def _get_target_rom_sets(rom_set_names: list[str], metadata: Metadata, sync_groups: bool) -> list[TargetRomSet]:
+    target_rom_sets = []
+    for rom_set_name in rom_set_names:
+        rom_set = metadata.find_rom_set(rom_set_name)
+        if rom_set is None:
+            logging.error("Rom set \"%s\" not found in metadata.yml.", rom_set_name)
+            sys.exit(1)
+
+        sync_rom_sets = []
+        if sync_groups and rom_set.group is not None:
+            sync_rom_sets = [rs for rs in metadata.find_group(rom_set.group) if rs != rom_set]
+
+        target_rom_sets.append(TargetRomSet(rom_set, sync_rom_sets))
+
+    return target_rom_sets
 
 
 def _scan_for_roms(progress_tracker: RenameProgressTracker,
                    input_directory: pathlib.Path,
-                   recursive: bool,
-                   extensions: list[str]) -> list[pathlib.Path | CueFile]:
+                   roms_sets: list[TargetRomSet]) -> list[RenameTarget]:
 
     progress_tracker.start_scan()
 
-    bin_files = []
-    bin_files_from_cue = set()
-
     results = []
-    glob_pattern = "**" if recursive else "*"
-    for file in input_directory.glob(glob_pattern):
-        file_name = file.name.casefold()
+    for rom_set in roms_sets:
+        glob_pattern = "**" if rom_set.primary_rom_set.recursive else "*"
+        scan_dir = input_directory / rom_set.primary_rom_set.path
+        for file in scan_dir.glob(glob_pattern):
+            relative_path = file.relative_to(input_directory)
+            file_name = file.name.casefold()
 
-        if not any(file_name.endswith(ext) for ext in extensions):
-            logging.debug("Skipping \"%s\" since it doesn't end with any of the specified extensions.", file)
-            continue
+            if not rom_set.is_included(relative_path):
+                logging.debug("Skipping file \"%s\" as it does not end with a desired extension.", file)
+                continue
 
-        # throw bin files in a separate list for now to make sure they are not part of a cue file
-        # Some systems use .bin as their rom extension that is different from a bin/cue file
-        if file_name.endswith('.bin') and '.cue' in extensions:
-            bin_files.append(file)
-            continue
+            if rom_set.is_excluded(relative_path):
+                logging.debug("Skipping file \"%s\" as it matches the exclude pattern of the rom set.", file)
+                continue
 
-        if file_name.endswith('.cue'):
-            bin_files = [file.parent / name for name in list_bin_files_from_cue(file)]
-            logging.debug("Scan found cue file \"%s\" with %d bin files.", file, len(bin_files))
-            bin_files_from_cue.update(bin_files)
-            results.append(CueFile(file, bin_files))
-        else:
-            logging.debug("Scan found rom file \"%s\".", file)
-            results.append(file)
+            sync_files = rom_set.get_files_to_sync(input_directory, file)
+            for sync_file in sync_files:
+                logging.debug("Found file \"%s\" to sync rename with \"%s\".", sync_file, file)
 
-    for bin_file in bin_files:
-        if bin_file not in bin_files_from_cue:
-            logging.debug("Scan found bin file \"%s\" not referenced by a cue file.", bin_file)
-            results.append(bin_file)
-        else:
-            logging.debug("Skipping bin file \"%s\" since it was referenced by a cue file.", bin_file)
+            if file_name.endswith('.cue'):
+                bin_files = [file.parent / name for name in list_bin_files_from_cue(file)]
+                logging.debug("Scan found cue file \"%s\" with %d bin files.", file, len(bin_files))
+                results.append(RenameTarget(CueFile(file, bin_files), sync_files))
+            else:
+                logging.debug("Scan found rom file \"%s\".", file)
+                results.append(RenameTarget(file, sync_files))
 
     progress_tracker.complete_scan()
 

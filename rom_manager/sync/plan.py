@@ -79,23 +79,23 @@ def _scan_source(src_path: pathlib.Path,
                  profile: Profile,
                  dot_files_mode: DotFilesMode) -> list[SrcDestPair]:
     copy_tasks = set()
-    for rom_folder_config in profile.rom_folders:
-        scan_dir = src_path / rom_folder_config.rom_folder.path
+    for rom_set_config in profile.rom_sets:
+        scan_dir = src_path / rom_set_config.rom_set.path
         logging.debug("Using rom folder %s to scan \"%s\" for roms with extensions: %s",
-                      rom_folder_config.rom_folder.name,
+                      rom_set_config.rom_set.name,
                       scan_dir,
-                      ', '.join(rom_folder_config.rom_folder.extensions))
+                      ', '.join(rom_set_config.rom_set.extensions))
         if not scan_dir.exists() or not scan_dir.is_dir():
             logging.warning(f"Source rom folder \"{scan_dir}\" does not exist or is not a directory. Skipping.")
             continue
 
-        glob_pattern = "**" if rom_folder_config.rom_folder.recursive else "*"
+        glob_pattern = "**" if rom_set_config.rom_set.recursive else "*"
 
         for file in scan_dir.glob(glob_pattern):
             if not file.is_file():
                 continue
 
-            if not rom_folder_config.rom_folder.is_included(file):
+            if not rom_set_config.rom_set.is_included(file):
                 logging.debug("Skipping file \"%s\" as it does not end with a desired extension.", file)
                 continue
 
@@ -104,19 +104,19 @@ def _scan_source(src_path: pathlib.Path,
                 continue
 
             relative_path = file.relative_to(scan_dir)
-            if rom_folder_config.rom_folder.is_excluded(relative_path):
-                logging.debug("Skipping file \"%s\" as it matches the exclude pattern of the rom folder.", file)
+            if rom_set_config.rom_set.is_excluded(relative_path):
+                logging.debug("Skipping file \"%s\" as it matches the exclude pattern of the rom set.", file)
                 continue
 
-            if rom_folder_config.is_excluded(relative_path):
+            if rom_set_config.is_excluded(relative_path):
                 logging.debug("Skipping file \"%s\" as it matches an exclude pattern of the profile.", file)
                 continue
 
-            if not rom_folder_config.is_included(relative_path):
+            if not rom_set_config.is_included(relative_path):
                 logging.debug("Skipping file \"%s\" as does not match any include pattern of the profile.", file)
                 continue
 
-            rom_dst_path = (dst_path / rom_folder_config.get_relative_destination(relative_path)).resolve()
+            rom_dst_path = (dst_path / rom_set_config.get_relative_destination(relative_path)).resolve()
             if not rom_dst_path.is_relative_to(dst_path):
                 raise ValueError(
                     f"Rom destination path \"{rom_dst_path}\" is not relative to the configured destination folder \"{dst_path}\"")
