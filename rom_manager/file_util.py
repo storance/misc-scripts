@@ -103,6 +103,11 @@ def copy_file(progress: ProgressWrapper,
                 fdest.write(chunk)
                 progress.advance(len(chunk))
 
+        # windows rename does not allow overwriting existing files, so we need to delete the destination file 
+        # if it exists before renaming the temp file to the destination file
+        if dst_path.exists():
+            dst_path.unlink()
+        
         tmp_file.rename(dst_path)
         if remove_sha1:
             remove_sha1_cache(dst_path)
