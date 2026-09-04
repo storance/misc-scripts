@@ -45,10 +45,13 @@ def create_plan(progress_tracker: SyncProgressTracker,
                 overwrite_check: OverwriteCheck,
                 delete: bool,
                 thread_count: int) -> Plan:
-    progress_tracker.plan_overall_progress.start(visible=True)
+    progress_tracker.start_plan()
 
     copy_candidates = _scan_source(src_path, dst_path, profile, dot_files_mode)
-    destination_files = _scan_dir(dst_path) if delete else []
+    if delete or overwrite_check == OverwriteCheck.HASH:
+        destination_files = _scan_dir(_list_all_dst_paths(dst_path, profile))
+    else:
+        destination_files = []
 
     rename_tasks = []
     hashes = {}
@@ -68,8 +71,7 @@ def create_plan(progress_tracker: SyncProgressTracker,
 
     copy_tasks = list(_filter_copy_tasks(copy_candidates, rename_tasks, overwrite_check, hashes))
 
-    progress_tracker.plan_overall_progress.advance()
-    progress_tracker.plan_overall_progress.stop()
+    progress_tracker.complete_plan()
 
     return Plan(delete_file_tasks, delete_dir_tasks, copy_tasks, rename_tasks)
 
@@ -127,12 +129,23 @@ def _scan_source(src_path: pathlib.Path,
     return sorted(list(copy_tasks), key=lambda t: t.src)
 
 
-def _scan_dir(scan_dir: pathlib.Path) -> list[pathlib.Path]:
+def _list_all_dst_paths(dst_path, profile) -> list[pathlib.Path]:
+    copy_tasks = set()
+    for profile_rom_set in profile.rom_sets:
+        dst_rom_set_path = dst_path / profile_rom_set.destination
+        if dst_rom_set_path.exists() and dst_rom_set_path.is_dir():
+            copy_tasks.add(dst_rom_set_path)
+
+    return sorted(copy_tasks)
+
+
+def _scan_dir(scan_dirs: list[pathlib.Path]) -> list[pathlib.Path]:
     results = []
 
-    for root_path, _, filenames in scan_dir.walk():
-        for file in filenames:
-            results.append(root_path / file)
+    for scan_dir in scan_dirs:
+        for root_path, _, filenames in scan_dir.walk():
+            for file in filenames:
+                results.append(root_path / file)
 
     return sorted(results)
 
@@ -147,9 +160,10 @@ def _hash_files(progress_tracker: SyncProgressTracker,
     dst_files_to_hash.update(_filter_dest_files_to_hash(profile, dst_files))
 
     if len(dst_files_to_hash) == 0:
+        logging.debug("No files found that need to be hashed in the destination folder.")
         return {}
 
-    progress_tracker.hash_overall_progress.start(visible=True, total=len(src_files_to_hash) + len(dst_files_to_hash))
+    progress_tracker.start_hash(len(src_files_to_hash) + len(dst_files_to_hash))
 
     with ThreadPoolExecutor(max_workers=thread_count) as executor:
         futures_to_path = {}
@@ -165,20 +179,21 @@ def _hash_files(progress_tracker: SyncProgressTracker,
 
         hashes = {}
         for future in as_completed(futures_to_path):
-            progress_tracker.hash_overall_progress.advance()
+            progress_tracker.advance_hash()
             file = futures_to_path[future]
             sha1 = future.result()
 
             hashes[file] = sha1
 
-    progress_tracker.hash_overall_progress.stop()
+    progress_tracker.stop_hash()
     return hashes
 
 
 def _filter_dest_files_to_hash(profile: Profile, dst_files: list[pathlib.Path]) -> Generator[pathlib.Path, None, None]:
     """Filter destination files to only include those that match any of the extensions in the profile's rom folders. """
     for file in dst_files:
-        if profile.is_interested_ext(file):
+        # ignore the MacOS metadata files that start with "._"
+        if profile.is_interested_ext(file) and not file.name.startswith("._"):
             yield file
 
 

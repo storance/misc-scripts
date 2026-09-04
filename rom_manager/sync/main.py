@@ -123,7 +123,7 @@ def sync_roms(console: Console, args: argparse.Namespace):
             )
         except Exception as e:
             progress_tracker.fail_plan()
-            logging.error("Failed to plan sync for \"%s\": %s", source_path, str(e))
+            logging.exception("Failed to plan sync for \"%s\": %s", source_path, str(e))
             sys.exit(1)
 
         if plan.empty():

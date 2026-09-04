@@ -23,8 +23,11 @@ def sha1_hash_file(file: pathlib.Path,
         progress.advance(total_size)
         progress.stop(visible=False)
         sha1 = _read_sha1_file(sha1_file)
-        logging.debug("Hashed \"%s\" to sha1 %s using cached value.", file, sha1)
-        return sha1
+        if sha1 is not None:
+            logging.debug("Hashed \"%s\" to sha1 %s using cached value.", file, sha1)
+            return sha1
+        else:
+            logging.warning("Failed to read cached sha1 file \"%s\". Regenerating sha1.", sha1_file)
 
     try:
         digest = hashlib.sha1()
@@ -58,10 +61,14 @@ def remove_sha1_cache(file: pathlib.Path):
         sha1_file.unlink()
 
 
-def _read_sha1_file(file: pathlib.Path) -> str:
-    with open(file, "r") as f:
-        sha1 = f.read().strip().casefold()
-        return sha1
+def _read_sha1_file(file: pathlib.Path) -> str|None:
+    try:
+        with open(file, "r") as f:
+            sha1 = f.read().strip().casefold()
+            return sha1
+    except Exception as e:
+        logging.error("Failed to read sha1 file \"%s\": %s", file, str(e))
+        return None
 
 
 def rename_file(old: pathlib.Path, new: pathlib.Path):

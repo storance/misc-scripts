@@ -184,22 +184,29 @@ def is_power_of_2(n: int) -> bool:
     return n > 0 and (n & (n-1)) == 0
 
 
+def get_full_suffix(file: pathlib.Path) -> str:
+    suffixes = [s for s in file.suffixes if _is_suffix_char(s) ]
+    return ''.join(suffixes)
+
+def _is_suffix_char(suffix: str) -> bool:
+    return all(c.isalnum() or c in ['.', '_', '-'] for c in suffix)
+
 def replace_suffix(file: pathlib.Path, new_suffix: str) -> pathlib.Path:
     """Returns a new pathlib.Path object with the suffix replaced by new_suffix. If the file has multiple suffixes, all of them will be replaced by new_suffix."""
     if not new_suffix.startswith('.'):
         new_suffix = '.' + new_suffix
 
-    all_exts = ''.join(file.suffixes)
+    all_exts = get_full_suffix(file)
 
     return file.with_name(file.name.removesuffix(all_exts) + new_suffix)
 
 def replace_stem(file: pathlib.Path, new_stem: str) -> pathlib.Path:
     """Returns a new pathlib.Path object with the stem replaced by new_stem. If the file has multiple suffixes, they will be preserved."""
 
-    all_exts = ''.join(file.suffixes)
+    all_exts = get_full_suffix(file)
     return file.with_name(new_stem + all_exts)
 
 def get_stem(file: pathlib.Path) -> str:
     """Returns the stem of the file, which is the filename without any suffixes.  This handles files with multiple suffixes, such as .tar.gz, and returns the filename without any of the suffixes."""
-    all_exts = ''.join(file.suffixes)
+    all_exts = get_full_suffix(file)
     return file.name.removesuffix(all_exts)

@@ -1,5 +1,4 @@
 import re
-import fnmatch
 import pathlib
 from typing import Any
 from .common import ParseError, Location, YamlType, extract_key, extract_key_and_location, enumerate_seq, validate_type, compile_regex, normalize_unicode
@@ -85,6 +84,6 @@ class Pattern:
         if self.type == PatternType.SUFFIX:
             return value.endswith(self.pattern)
         if self.type == PatternType.REGEX:
-            return self.compiled_pattern.match(value) is not None
+            return self.compiled_pattern.match(value) is not None # type: ignore should not be None for REGEX type
 
         raise ValueError(f"Unsupported pattern type \"{self.type}\"")

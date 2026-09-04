@@ -82,11 +82,10 @@ def configure_compress_parser(parser: argparse.ArgumentParser):
                         default=CompressionFormat.CHD,
                         help='Output format for compressed files.  Valid values are %(choices)s')
     parser.add_argument('-r', '--rom-set',
+                        nargs="+",
                         required=True,
-                        nargs=2,
-                        action='append',
-                        metavar=('INPUT_ROM_SET', 'OUTPUT_ROM_SET'),
-                        help='Pairs of input and output rom sets to compress. Roms will be scanned from the input rom set then compressed and stored in the output rom set.')
+                        help='Rom sets to compress in the format of input_rom_set[:output_rom_set].' +
+                        'If the output rom set is not specified, it will be auto-discovered based on the input rom set\'s group and the format\'s extension.')
     parser.add_argument('input_directory',
                         type=pathlib.Path,
                         help='Directory containing ISO and BIN/CUE files to compress')
@@ -142,28 +141,52 @@ def compress_roms(console: Console, args: argparse.Namespace):
         progress_tracker.stop()
 
 
-def _get_rom_set_pairs(rom_sets: list[tuple[str, str]], metadata: Metadata, format: CompressionFormat) -> list[RomSetPair]:
+def _get_rom_set_pairs(rom_sets: list[str], metadata: Metadata, format: CompressionFormat) -> list[RomSetPair]:
     rom_set_pairs = []
-    for input_rom_set_name, output_rom_set_name in rom_sets:
+    for rom_set_value in rom_sets:
+        rom_set_parts = rom_set_value.split(':', 1)
+
+        input_rom_set_name = rom_set_parts[0]
         input_rom_set = metadata.find_rom_set(input_rom_set_name)
         if input_rom_set is None:
             logging.error("Input rom set \"%s\" does not exist in metadata.yml.", input_rom_set_name)
             sys.exit(1)
 
-        output_rom_set = metadata.find_rom_set(output_rom_set_name)
-        if output_rom_set is None:
-            logging.error("Output rom set \"%s\" does not exist in metadata.yml.", output_rom_set_name)
-            sys.exit(1)
+        if len(rom_set_parts) == 1:
+            if input_rom_set.group is None:
+                logging.error("Input rom set \"%s\" does not have a group defined in metadata.yml, " +
+                              "so the output rom set cannot be auto-discovered.", input_rom_set_name)
+                sys.exit(1)
+
+            group_members = metadata.find_group(input_rom_set.group)
+            output_rom_set = None
+            for member in group_members:
+                if format.output_ext() in member.extensions:
+                    output_rom_set = member
+                    break
+
+            if output_rom_set is None:
+                logging.error("No rom set in group \"%s\" contains the output extension %s for format %s.",
+                              input_rom_set.group, format.output_ext(), format)
+                sys.exit(1)
+        else:
+            output_rom_set_name = rom_set_parts[1]
+            output_rom_set = metadata.find_rom_set(output_rom_set_name)
+            if output_rom_set is None:
+                logging.error("Output rom set \"%s\" does not exist in metadata.yml.", output_rom_set_name)
+                sys.exit(1)
+
+            if format.output_ext() not in output_rom_set.extensions:
+                logging.error("Output rom set \"%s\" does not contain the output extension %s for format %s.",
+                              output_rom_set.name, format.output_ext(), format)
+                sys.exit(1)
 
         if not any(ext in format.supported_exts() for ext in input_rom_set.extensions):
             logging.error("Input rom set \"%s\" does not contain supported extensions for format %s.",
                           input_rom_set_name, format)
             sys.exit(1)
-        if format.output_ext() not in output_rom_set.extensions:
-            logging.error("Output rom set \"%s\" does not contain the output extension %s for format %s.",
-                          output_rom_set_name, format.output_ext(), format)
-            sys.exit(1)
 
+        logging.debug("Adding rom set pair: input=\"%s\", output=\"%s\"", input_rom_set.name, output_rom_set.name)
         rom_set_pairs.append(RomSetPair(input_rom_set, output_rom_set))
     return rom_set_pairs
 

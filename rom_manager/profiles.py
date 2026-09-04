@@ -206,6 +206,14 @@ class GameNameExtractorConfig:
         return self.pattern.sub(self.replacement, path.name)
 
 
+@dataclass
+class DirLetterConfig:
+    enabled: bool
+    letter_count: int = 1
+    limit: int|None = None
+    group: bool = False
+
+
 def _build_destination(rom_folder: RomSet, root_folder: pathlib.Path | None, destination: str | None) -> pathlib.Path:
     if destination is None:
         destination = rom_folder.path
