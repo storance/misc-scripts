@@ -5,6 +5,9 @@ from typing import Any
 from .common import ParseError, YamlType, Location, extract_key, extract_key_and_location, enumerate_seq, validate_type
 from .pattern import Pattern
 
+METADATA_DIR = pathlib.Path(".metadata")
+PROFILES_DIR = METADATA_DIR / "profiles"
+DATS_DIR = METADATA_DIR / "dats"
 
 @dataclass
 class Metadata:
@@ -43,6 +46,7 @@ class RomSet:
     recursive: bool
     extensions: list[str]
     excludes: list[Pattern]
+    dat_files: list[str]
 
     @staticmethod
     def from_yaml(yaml_value: dict, location: Location) -> RomSet:
@@ -56,6 +60,7 @@ class RomSet:
                                 default=False, expected_types=YamlType.BOOL)
         extensions = _parse_extensions(*extract_key_and_location(yaml_value, 'extensions', location,
                                                                  required=True, expected_types=YamlType.SEQ))
+        dat_files = extract_key(yaml_value, 'dat_files', location, default=[], expected_types=YamlType.SEQ)
         excludes, excludes_loc = extract_key_and_location(yaml_value, 'excludes', location,
                                                           default=[], expected_types=YamlType.SEQ)
 
@@ -64,7 +69,8 @@ class RomSet:
                       group,
                       recursive,
                       extensions,
-                      Pattern.from_yaml_list(excludes, excludes_loc))
+                      Pattern.from_yaml_list(excludes, excludes_loc),
+                      dat_files)
 
     @staticmethod
     def from_yaml_list(yaml_values: list, location: Location) -> list[RomSet]:
@@ -110,3 +116,12 @@ def _parse_extensions(yaml_values: list, location: Location) -> list[str]:
         exts.append(ext.casefold())
 
     return exts
+
+def get_metadata_file_path(source_dir: pathlib.Path) -> pathlib.Path:
+    return source_dir / METADATA_DIR / "metadata.yml"
+
+def get_profile_file_path(source_dir: pathlib.Path, profile_name: str) -> pathlib.Path:
+    return source_dir / PROFILES_DIR / pathlib.Path(profile_name).with_suffix('.yml')
+
+def get_dat_file_path(source_dir: pathlib.Path, dat_file: str) -> pathlib.Path:
+    return source_dir / DATS_DIR / pathlib.Path(dat_file)

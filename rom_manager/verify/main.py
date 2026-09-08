@@ -30,13 +30,13 @@ def configure_verify_parser(parser: argparse.ArgumentParser):
                         help='Extension of the rom files too look at.  For example: iso, chd, cue.  For bin/cue files use cue as the extension.')
     parser.add_argument('-r', '--recursive',
                         action='store_true',
-                        help='Recursively search sub-directories for rom files to rename.')
+                        help='Recursively search sub-directories for rom files to verify.')
     parser.add_argument('-t', '--threads',
                         type=int,
                         default=3,
                         help='Number of threads to use to hash files in parallel.')
     parser.add_argument('input_directory',
-                        help='Input directory containing the roms to rename.')
+                        help='Input directory containing the roms to verify.')
     parser.set_defaults(action=verify_roms, log_file='verify.log')
 
 

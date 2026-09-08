@@ -5,6 +5,7 @@ from .progress import ProgressWrapper
 from .common import generate_random_string
 
 SHA1_EXT = '.sha1'
+SHA1_HASH_LEN = 40
 RANDOM_SUFFIX_LEN = 6
 
 
@@ -19,7 +20,7 @@ def sha1_hash_file(file: pathlib.Path,
     progress.start(visible=True)
 
     sha1_file = file.with_name(file.name + SHA1_EXT)
-    if sha1_file.exists() and not force_regenerate and use_cache:
+    if not force_regenerate and use_cache and is_sha1_cached(file):
         progress.advance(total_size)
         progress.stop(visible=False)
         sha1 = _read_sha1_file(sha1_file)
@@ -54,6 +55,12 @@ def sha1_hash_file(file: pathlib.Path,
         logging.error("Failed to hash file \"%s\": %s", file, str(e))
         return None
 
+def is_sha1_cached(file: pathlib.Path):
+    sha1_file = file.with_name(file.name + SHA1_EXT)
+    if not sha1_file.exists():
+        return False
+    # allow for a trailing newline
+    return sha1_file.stat().st_size in [SHA1_HASH_LEN, SHA1_HASH_LEN+1]
 
 def remove_sha1_cache(file: pathlib.Path):
     sha1_file = file.with_name(file.name + SHA1_EXT)

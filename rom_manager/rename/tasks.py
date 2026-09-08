@@ -21,7 +21,7 @@ class RenameSingleRomTask(RenameTask):
 
     def execute(self):
         logging.info("Renaming file \"%s\" to \"%s\" in \"%s\".",
-                     self.old_file, self.new_file.name, self.old_file.parent)
+                     self.old_file.name, self.new_file.name, self.old_file.parent)
         try:
             rename_file(self.old_file, self.new_file)
         except OSError as e:
@@ -45,7 +45,7 @@ class RenameCueTask(RenameTask):
     def execute(self):
         if self.old_cue_file.name != self.new_cue_file.name:
             try:
-                logging.info("Renaming cue file \"%s\" to \"%s\" in \"%s\".", self.old_cue_file,
+                logging.info("Renaming cue file \"%s\" to \"%s\" in \"%s\".", self.old_cue_file.name,
                              self.new_cue_file.name, self.old_cue_file.parent)
                 rename_file(self.old_cue_file, self.new_cue_file)
             except OSError as e:

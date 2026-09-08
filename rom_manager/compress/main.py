@@ -13,7 +13,7 @@ from rich.console import Console
 from rich.live import Live
 
 from .progress import CompressProgressTracker
-from .. import Metadata, RomSet, ParseError, replace_suffix
+from .. import Metadata, RomSet, ParseError, replace_suffix, get_metadata_file_path
 
 
 class CompressionFormat(StrEnum):
@@ -23,6 +23,7 @@ class CompressionFormat(StrEnum):
     CISO = 'ciso'
     WUX = 'wux'
     WBFS = 'wbfs'
+    XISO = 'xiso'
 
     def supported_exts(self) -> list[str]:
         if self == CompressionFormat.CHD:
@@ -45,6 +46,8 @@ class CompressionFormat(StrEnum):
             return '.ciso'
         elif self == CompressionFormat.WBFS:
             return '.wbfs'
+        elif self == CompressionFormat.XISO:
+            return '.xiso'
         else:
             raise ValueError(f"Unknown compression format {self}")
 
@@ -64,6 +67,7 @@ class CompressPair:
 IS_WINDOWS = os.name == 'nt'
 DEFAULT_CHDMAN_PATH = 'chdman.exe' if IS_WINDOWS else 'chdman'
 DEFAULT_NKIT_PATH = 'nkit.exe' if IS_WINDOWS else 'nkit'
+DEFAULT_XDVDFS_PATH = 'xdvdfs.exe' if IS_WINDOWS else 'xdvdfs'
 CHUNK_SIZE = 64 * 1024
 
 
@@ -75,6 +79,10 @@ def configure_compress_parser(parser: argparse.ArgumentParser):
     parser.add_argument('--nkit-path',
                         type=pathlib.Path,
                         default=DEFAULT_NKIT_PATH,
+                        help='Path to the nkit V2 cli executable')
+    parser.add_argument('--xdvdfs-path',
+                        type=pathlib.Path,
+                        default=DEFAULT_XDVDFS_PATH,
                         help='Path to the nkit V2 cli executable')
     parser.add_argument('-f', '--format',
                         choices=list(CompressionFormat),
@@ -100,7 +108,7 @@ def compress_roms(console: Console, args: argparse.Namespace):
             logging.error("Input directory \"%s\" does not exist or is not a directory.", args.input_directory)
             sys.exit(1)
 
-        metadata_file = args.input_directory / "metadata.yml"
+        metadata_file = get_metadata_file_path(args.input_directory)
         if not metadata_file.exists():
             logging.error("metadata.yml does not exist in \"%s\".", args.input_directory)
             sys.exit(1)
@@ -132,6 +140,7 @@ def compress_roms(console: Console, args: argparse.Namespace):
                             files_to_compress,
                             args.chdman_path,
                             args.nkit_path,
+                            args.xdvdfs_path,
                             args.format)
         except Exception as e:
             progress_tracker.fail_scan()
@@ -239,12 +248,15 @@ def _compress_files(progress_tracker: CompressProgressTracker,
                     files_to_compress: list[CompressPair],
                     chdman_path: pathlib.Path,
                     nkit_path: pathlib.Path,
+                    xdvdfs_path: pathlib.Path,
                     format: CompressionFormat):
     progress_tracker.start_compress(len(files_to_compress))
 
     for file in files_to_compress:
         if format == CompressionFormat.CHD:
             run_chdman(chdman_path, file)
+        elif format == CompressionFormat.XISO:
+            run_xdvdfs(xdvdfs_path, file)
         else:
             keys_zip = _create_keys_zip(format, file.input_file)
             try:
@@ -253,7 +265,7 @@ def _compress_files(progress_tracker: CompressProgressTracker,
                 if keys_zip is not None and keys_zip.exists():
                     keys_zip.unlink()
 
-        progress_tracker.compress_overall_progress.advance()
+        progress_tracker.advance_compress()
 
     progress_tracker.stop_compress()
 
@@ -294,16 +306,26 @@ def run_nkit(nkit_path: pathlib.Path,
     _execute_process(compress_file.input_file, args, True)
 
 
-def _execute_process(input_file: pathlib.Path, args: list[Any], check: bool = True, input: str | None = None):
-    logging.debug("Executing command: %s", ' '.join(args))
-    result = subprocess.run(args,
-                            text=True,
-                            input=input,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT)
+def run_xdvdfs(xdvdfs_path: pathlib.Path,
+               compress_file: CompressPair):
+    logging.info("Compressing \"%s\" to \"%s\".", compress_file.input_file, compress_file.output_file)
+    args = [str(xdvdfs_path), 'pack', str(compress_file.input_file), str(compress_file.output_file)]
+    _execute_process(compress_file.input_file, args, True)
 
-    if check and result.returncode != 0:
-        logging.error("Failed to compress \"%s\".", input_file)
-        logging.error("Command output: %s", result.stdout)
-    else:
-        logging.debug("Command output: %s", result.stdout)
+
+def _execute_process(input_file: pathlib.Path, args: list[Any], check: bool = True):
+    logger = logging.getLogger("file-only")
+    logger.info("Executing command: %s", ' '.join(args))
+    with subprocess.Popen(args,
+                          text=True,
+                          bufsize=1,
+                          stdin=subprocess.PIPE,
+                          stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT) as process:
+        for line in process.stdout: # type: ignore we're explicitly using stdout=PIPE
+            clean_line = line.rstrip("\n")
+            logger.info(clean_line)
+
+    return_code = process.wait()
+    if check and return_code != 0:
+        logging.error("Failed to compress \"%s\". Exit code %d", input_file, return_code)

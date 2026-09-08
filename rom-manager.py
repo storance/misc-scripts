@@ -53,7 +53,8 @@ def main():
     trim_parser = subparsers.add_parser('trim', help='Trims or untrims 3ds and NDS rom files')
     configure_trim_parser(trim_parser)
 
-    verify_parser = subparsers.add_parser('verify', help='Verifies roms by comparing their hashes to entries in a no-intro or redump dat file.')
+    verify_parser = subparsers.add_parser(
+        'verify', help='Verifies roms by comparing their hashes to entries in a no-intro or redump dat file.')
     configure_verify_parser(verify_parser)
 
     args = parser.parse_args()
@@ -68,14 +69,21 @@ def main():
     file_handler = logging.FileHandler(args.log_file, 'w')
     file_handler.setFormatter(file_formatter)
 
+    rich_handler = RichHandler(level=logging.WARNING if args.quiet else logging.INFO,
+                               console=console, show_path=False, highlighter=LogHighlighter())
+
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format='%(message)s',
         handlers=[
             file_handler,
-            RichHandler(level=logging.WARNING if args.quiet else logging.INFO, console=console, show_path=False, highlighter=LogHighlighter())
+            rich_handler
         ]
     )
+
+    logger = logging.getLogger("file-only")
+    logger.addHandler(file_handler)
+    logger.propagate = False
 
     args.action(console, args)
 

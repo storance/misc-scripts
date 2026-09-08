@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from rich.console import Console
 from rich.live import Live
 
-from .. import Metadata, Profile, ParseError, copy_file, rename_file
+from .. import Metadata, Profile, ParseError, copy_file, rename_file, get_metadata_file_path, get_profile_file_path
 from .progress import SyncProgressTracker
 from .plan import Plan, create_plan
 from .common import OverwriteCheck, DotFilesMode
@@ -67,7 +67,7 @@ def sync_roms(console: Console, args: argparse.Namespace):
             logging.error("Source path \"%s\" does not exist or is not a directory.", source_path)
             sys.exit(1)
 
-        metadata_file = source_path / "metadata.yml"
+        metadata_file = get_metadata_file_path(source_path)
         if not metadata_file.exists():
             logging.error("metadata.yml does not exist in \"%s\".", source_path)
             sys.exit(1)
@@ -96,9 +96,9 @@ def sync_roms(console: Console, args: argparse.Namespace):
                 logging.error("Profile path \"%s\" does not exist.", profile_path)
                 sys.exit(1)
         else:
-            profile_path = source_path / 'profiles' / pathlib.Path(args.profile).with_suffix('.yml')
+            profile_path = get_profile_file_path(source_path, args.profile)
             if not profile_path.exists():
-                logging.error("Profile \"%s\" does not exist in \"%s/profiles\".", args.profile, source_path)
+                logging.error("Profile \"%s\" does not exist in \"%s\".", args.profile, profile_path.parent)
                 sys.exit(1)
 
         try:

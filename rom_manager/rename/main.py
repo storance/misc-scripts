@@ -10,15 +10,10 @@ from .dat import load_dat_files
 from .progress import RenameProgressTracker
 from .tasks import build_rename_tasks
 from .common import CueFile, RenameTarget, TargetRomSet
-from .. import Metadata, ParseError, sha1_hash_file, list_bin_files_from_cue
+from .. import Metadata, ParseError, sha1_hash_file, is_sha1_cached, list_bin_files_from_cue, get_metadata_file_path, get_dat_file_path
 
 
 def configure_rename_parser(parser: argparse.ArgumentParser):
-    parser.add_argument('-d', '--dat-file',
-                        required=True,
-                        nargs="+",
-                        type=pathlib.Path,
-                        help='Location of the dat files containing rom hashes and filenames.')
     parser.add_argument('-s', '--sync-group',
                         action="store_true",
                         help='Synchronizes the rename across all rom sets in the same group.')
@@ -29,6 +24,9 @@ def configure_rename_parser(parser: argparse.ArgumentParser):
                         type=int,
                         default=3,
                         help='Number of threads to use to hash files in parallel.')
+    parser.add_argument('-i', '--ignore-cached-hashes',
+                        action="store_true",
+                        help='Ignore any cached sha1 hashes and force them to be regenerated.')
     parser.add_argument('-r', '--rom-sets', nargs="+", required=True, help='The name of the rom sets to rename.')
     parser.add_argument('input_directory',
                         type=pathlib.Path,
@@ -45,12 +43,10 @@ def rename_roms(console: Console, args: argparse.Namespace):
             logging.error("Input directory path \"%s\" does not exist or is not a directory.", args.input_directory)
             sys.exit(1)
 
-        metadata_file = args.input_directory / "metadata.yml"
+        metadata_file = get_metadata_file_path(args.input_directory)
         if not metadata_file.exists():
             logging.error("metadata.yml does not exist in \"%s\".", args.input_directory)
             sys.exit(1)
-
-        games_by_hash = load_dat_files(args.dat_file)
 
         try:
             metadata = Metadata.load_from_file(metadata_file)
@@ -62,6 +58,7 @@ def rename_roms(console: Console, args: argparse.Namespace):
             sys.exit(1)
 
         rom_sets = _get_target_rom_sets(args.rom_sets, metadata, args.sync_group)
+        games_by_hash = load_dat_files(_get_all_dat_files(args.input_directory, rom_sets))
 
         try:
             scan_result = _scan_for_roms(progress_tracker, args.input_directory, rom_sets)
@@ -83,7 +80,7 @@ def rename_roms(console: Console, args: argparse.Namespace):
             return
 
         try:
-            hashes_by_path = _hash_files(progress_tracker, args.threads, files_to_hash)
+            hashes_by_path = _hash_files(progress_tracker, args.threads, files_to_hash, args.ignore_cached_hashes)
         except Exception as e:
             progress_tracker.fail_hash()
             logging.error("Failed to hash files: %s", str(e))
@@ -129,6 +126,14 @@ def _get_target_rom_sets(rom_set_names: list[str], metadata: Metadata, sync_grou
     return target_rom_sets
 
 
+def _get_all_dat_files(input_directory: pathlib.Path, rom_sets: list[TargetRomSet]) -> list[pathlib.Path]:
+    dat_files = []
+    for rom_set in rom_sets:
+        for dat_file in rom_set.primary_rom_set.dat_files:
+            dat_files.append(get_dat_file_path(input_directory, dat_file))
+    return dat_files
+
+
 def _scan_for_roms(progress_tracker: RenameProgressTracker,
                    input_directory: pathlib.Path,
                    roms_sets: list[TargetRomSet]) -> list[RenameTarget]:
@@ -170,14 +175,15 @@ def _scan_for_roms(progress_tracker: RenameProgressTracker,
 
 def _hash_files(progress_tracker: RenameProgressTracker,
                 thread_count: int,
-                files: list[pathlib.Path]) -> dict[pathlib.Path, str]:
+                files: list[pathlib.Path],
+                ignore_cached_hashes: bool) -> dict[pathlib.Path, str]:
     progress_tracker.start_hash(len(files))
 
     with ThreadPoolExecutor(max_workers=thread_count) as executor:
         futures_to_path = {}
         for file in files:
             file_progress = progress_tracker.add_hash_file_task(file, file.stat().st_size)
-            future = executor.submit(sha1_hash_file, file, file_progress)
+            future = executor.submit(sha1_hash_file, file, file_progress, force_regenerate=ignore_cached_hashes)
             futures_to_path[future] = file
 
         hashes = {}

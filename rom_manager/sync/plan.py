@@ -8,7 +8,7 @@ from .common import HashFileSource, OverwriteCheck, DotFilesMode
 from .progress import SyncProgressTracker
 from .. import Profile, sha1_hash_file, SHA1_EXT
 
-__all__ = ['Plan', 'SrcDestPair', 'FileDetails', 'DotFilesMode', 'create_plan']
+__all__ = ['Plan', 'SrcDestPair', 'DotFilesMode', 'create_plan']
 
 
 @dataclass
@@ -27,14 +27,6 @@ class Plan:
 class SrcDestPair:
     src: pathlib.Path
     dst: pathlib.Path
-
-
-@dataclass
-class FileDetails:
-    path: pathlib.Path
-    size: int | None
-    modified_time: float | None
-    sha1_hash: str | None
 
 
 def create_plan(progress_tracker: SyncProgressTracker,
