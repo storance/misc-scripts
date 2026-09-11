@@ -1,24 +1,17 @@
-import re
 import pathlib
+from enum import StrEnum
 from ruamel.yaml import YAML
 from dataclasses import dataclass, field
 from typing import Any
 from .pattern import Pattern
 from .common import ParseError, Location, YamlType, extract_key, extract_key_and_location, \
-    enumerate_seq, enumerate_mapping, validate_type, compile_regex
+    enumerate_seq, enumerate_mapping, validate_type
 from .metadata import Metadata, RomSet
-
-
-DEFAULT_GAME_NAME_EXTRACTOR = re.compile(r'^(.+?)(?:\s*\(.+\)\s*)*\..+$', re.IGNORECASE)
-DEFAULT_REPLACEMENT = r'\1'
 
 
 @dataclass
 class Profile:
-    root_folder: pathlib.Path | None
-    rom_sets: list[ProfileRomSetConfig]
-    delete_excludes: list[Pattern]
-    _interested_exts: set[str] | None = field(default=None, init=False)
+    folders: list[ProfileFolder]
 
     @classmethod
     def load_from_file(cls, file: pathlib.Path, metadata: Metadata) -> Profile:
@@ -32,65 +25,61 @@ class Profile:
     def from_yaml(yaml_value: Any, location: Location, metadata: Metadata) -> Profile:
         validate_type(yaml_value, YamlType.MAPPING, location)
 
-        root_folder = extract_key(yaml_value, 'root_folder', location, expected_types=YamlType.STRING)
-        if root_folder is not None:
-            root_folder = pathlib.Path(root_folder)
+        folders, folders_loc = extract_key_and_location(yaml_value, 'folders', location,
+                                                        required=True,
+                                                        expected_types=YamlType.SEQ)
 
-        raw_rom_folders, rom_folders_loc = extract_key_and_location(yaml_value, 'rom_folders', location,
-                                                                    required=True,
-                                                                    expected_types=YamlType.SEQ)
-        rom_folders = [ProfileRomSetConfig.from_yaml(rom_folder, loc, root_folder, metadata)
-                       for rom_folder, loc in enumerate_seq(raw_rom_folders, rom_folders_loc)]
+        return Profile(ProfileFolder.from_yaml_list(folders, folders_loc, metadata))
 
-        delete_excludes, delete_excludes_loc = extract_key_and_location(yaml_value, 'delete_excludes', location,
-                                                                        default=[])
 
-        return Profile(root_folder, rom_folders, Pattern.from_yaml_list(delete_excludes, delete_excludes_loc))
+@dataclass
+class ProfileFolder:
+    path: pathlib.Path
+    grouping: GroupingConfig | None
+    rom_sets: list[ProfileRomSet]
+    delete_excludes: list[Pattern]
 
-    @property
-    def interested_exts(self) -> set[str]:
-        if self._interested_exts is None:
-            self._interested_exts = set()
-            for rfc in self.rom_sets:
-                self._interested_exts.update(rfc.rom_set.extensions)
+    @staticmethod
+    def from_yaml(yaml_value: Any, location: Location, metadata: Metadata) -> ProfileFolder:
+        validate_type(yaml_value, YamlType.MAPPING, location)
 
-        return self._interested_exts
+        path = extract_key(yaml_value, 'path', location, required=True, expected_types=YamlType.STRING)
+        grouping, grouping_loc = extract_key_and_location(
+            yaml_value, 'grouping', location, expected_types=YamlType.MAPPING)
+        rom_sets, rom_sets_loc = extract_key_and_location(yaml_value, 'rom_sets', location, expected_types=YamlType.SEQ)
+        delete_excludes, delete_excludes_loc = extract_key_and_location(
+            yaml_value, 'delete_excludes', location, expected_types=YamlType.SEQ)
 
-    def is_interested_ext(self, file: pathlib.Path) -> bool:
-        return any(file.name.endswith(ext) for ext in self.interested_exts)
+        return ProfileFolder(
+            pathlib.Path(path),
+            GroupingConfig.from_yaml(grouping, grouping_loc),
+            ProfileRomSet.from_yaml_list(rom_sets, rom_sets_loc, metadata),
+            Pattern.from_yaml_list(delete_excludes, delete_excludes_loc)
+        )
 
-    def is_include_for_delete(self, file: pathlib.Path) -> bool:
-        if not self.is_interested_ext(file):
-            return False
-
-        return not any(exclude.matches(file) for exclude in self.delete_excludes)
+    @classmethod
+    def from_yaml_list(cls, yaml_values: list[Any], location: Location, metadata: Metadata) -> list[ProfileFolder]:
+        return [cls.from_yaml(value, loc, metadata) for value, loc in enumerate_seq(yaml_values, location)]
 
 
 @dataclass(frozen=True)
-class ProfileRomSetConfig:
+class ProfileRomSet:
     rom_set: RomSet
-    destination: pathlib.Path
     includes: list[Pattern]
     excludes: list[Pattern]
-    folder_per_game: FolderPerGameConfig
-    flatten: bool
 
     @staticmethod
-    def from_yaml(yaml_value: dict,
+    def from_yaml(yaml_value: Any,
                   location: Location,
-                  root_folder: pathlib.Path | None,
-                  metadata: Metadata) -> ProfileRomSetConfig:
+                  metadata: Metadata) -> ProfileRomSet:
         validate_type(yaml_value, YamlType.MAPPING, location)
-
         name, name_loc = extract_key_and_location(yaml_value, 'name', location,
                                                   required=True,
                                                   expected_types=YamlType.STRING)
         rom_set = metadata.find_rom_set(name)
         if rom_set is None:
-            raise ParseError(
-                f"A rom set with the name '{name}' does not exist in the metadata.yml", name_loc)
+            raise ParseError(f"A rom set with the name '{name}' does not exist in the metadata.yml", name_loc)
 
-        destination = extract_key(yaml_value, 'destination', location, expected_types=YamlType.STRING)
         includes, includes_loc = extract_key_and_location(yaml_value, 'includes', location,
                                                           default=[],
                                                           expected_types=YamlType.SEQ)
@@ -98,30 +87,13 @@ class ProfileRomSetConfig:
                                                           default=[],
                                                           expected_types=YamlType.SEQ)
 
-        fpg_config, fpg_loc = extract_key_and_location(yaml_value, 'folder_per_game', location)
-        if fpg_config is None:
-            fpg_config = FolderPerGameConfig.disabled()
-        else:
-            fpg_config = FolderPerGameConfig.from_yaml(fpg_config, fpg_loc)
+        return ProfileRomSet(rom_set,
+                             Pattern.from_yaml_list(includes, includes_loc),
+                             Pattern.from_yaml_list(excludes, excludes_loc))
 
-        flatten = extract_key(yaml_value, 'flatten', location, default=False, expected_types=YamlType.BOOL)
-
-        return ProfileRomSetConfig(rom_set,
-                                   _build_destination(rom_set, root_folder, destination),
-                                   Pattern.from_yaml_list(includes, includes_loc),
-                                   Pattern.from_yaml_list(excludes, excludes_loc),
-                                   fpg_config,
-                                   flatten)
-
-    def get_relative_destination(self, src_relative_path: pathlib.Path) -> pathlib.Path:
-        if self.flatten or self.folder_per_game.enabled:
-            src_relative_path = pathlib.Path(src_relative_path.name)
-
-        if self.folder_per_game.enabled:
-            folder_name = self.folder_per_game.extract_game_name(src_relative_path)
-            return self.destination / folder_name / src_relative_path
-        else:
-            return self.destination / src_relative_path
+    @classmethod
+    def from_yaml_list(cls, yaml_values: list[Any], location: Location, metadata: Metadata) -> list[ProfileRomSet]:
+        return [cls.from_yaml(value, loc, metadata) for value, loc in enumerate_seq(yaml_values, location)]
 
     def is_excluded(self, relative_path: pathlib.Path) -> bool:
         return any(exclude.matches(relative_path) for exclude in self.excludes)
@@ -133,94 +105,158 @@ class ProfileRomSetConfig:
         return any(include.matches(relative_path) for include in self.includes)
 
 
-@dataclass
-class FolderPerGameConfig:
-    enabled: bool
-    game_name_extractor: GameNameExtractorConfig
-    overrides: dict[str, list[Pattern]]
-
-    @staticmethod
-    def disabled() -> FolderPerGameConfig:
-        return FolderPerGameConfig(False, GameNameExtractorConfig(), {})
-
-    @staticmethod
-    def from_yaml(yaml_value: Any, location: Location) -> FolderPerGameConfig:
-        validate_type(yaml_value, [YamlType.BOOL, YamlType.MAPPING], location)
-
-        if isinstance(yaml_value, bool):
-            return FolderPerGameConfig(yaml_value, GameNameExtractorConfig(), {})
-
-        enabled = extract_key(yaml_value, 'enabled', location, required=True, expected_types=YamlType.BOOL)
-        raw_gne, gne_loc = extract_key_and_location(yaml_value, 'game_name_extractor', location)
-        if raw_gne is None:
-            gne = GameNameExtractorConfig()
-        else:
-            gne = GameNameExtractorConfig.from_yaml(raw_gne, gne_loc)
-
-        raw_overrides, overrides_loc = extract_key_and_location(yaml_value, 'overrides', location,
-                                                                default={},
-                                                                expected_types=YamlType.MAPPING)
-
-        overrides = {key: Pattern.from_yaml_list(value, key_loc)
-                     for key, value, key_loc in enumerate_mapping(raw_overrides, overrides_loc)}
-        return FolderPerGameConfig(enabled, gne, overrides)
-
-    def extract_game_name(self, path: pathlib.Path) -> str:
-        if not self.enabled:
-            raise ValueError("Folder per game is not enabled.")
-
-        for (name, matchers) in self.overrides.items():
-            if any(matcher.matches(path) for matcher in matchers):
-                return name
-
-        return self.game_name_extractor.extract(path)
+class GroupType(StrEnum):
+    GAME = 'game'
+    LANG = 'lang'
+    REGION = 'region'
+    LETTER = 'letter'
 
 
 @dataclass
-class GameNameExtractorConfig:
-    pattern: re.Pattern = DEFAULT_GAME_NAME_EXTRACTOR
-    replacement: str = DEFAULT_REPLACEMENT
-    case_sensitive: bool = False
+class GroupingConfig:
+    group_by: list[GroupType]
+    by_game: GroupByGameConfig | None
+    by_region: GroupByRegionConfig | None
+    by_lang: GroupByLangConfig | None
+    by_prefix: GroupByPrefixConfig | None
 
     @staticmethod
-    def from_yaml(yaml_value: Any, location: Location) -> GameNameExtractorConfig:
-        validate_type(yaml_value, [YamlType.STRING, YamlType.MAPPING], location)
+    def disabled() -> GroupingConfig:
+        return GroupingConfig([], None, None, None, None)
 
-        if isinstance(yaml_value, str):
-            return GameNameExtractorConfig(compile_regex(yaml_value, location, False))
+    @staticmethod
+    def from_yaml(yaml_value: Any, location: Location,) -> GroupingConfig:
+        if yaml_value is None:
+            return GroupingConfig.disabled()
 
-        pattern, pattern_loc = extract_key_and_location(yaml_value, 'pattern', location,
-                                                        default=DEFAULT_GAME_NAME_EXTRACTOR.pattern,
-                                                        expected_types=YamlType.STRING)
-        replacement = extract_key(yaml_value, 'replacement', location,
-                                  default=DEFAULT_REPLACEMENT,
-                                  expected_types=YamlType.STRING)
-        case_sensitive = extract_key(yaml_value, 'case_sensitive', location,
-                                     default=False,
-                                     expected_types=YamlType.BOOL)
-        compiled_pattern = compile_regex(pattern, pattern_loc, case_sensitive)
+        validate_type(yaml_value, YamlType.MAPPING, location)
+        by_raw, by_loc = extract_key_and_location(yaml_value, 'by', location,
+                                                  default=[],
+                                                  expected_types=YamlType.SEQ)
+        group_by = []
+        for value in by_raw:
+            try:
+                group_by.append(GroupType(value))
+            except ValueError:
+                raise ParseError(f"Invalid group-by type: {value}", by_loc)
 
-        return GameNameExtractorConfig(compiled_pattern, replacement, case_sensitive)
+        by_game, by_game_loc = extract_key_and_location(yaml_value, 'by_game', location,
+                                                        expected_types=YamlType.MAPPING)
+        by_region, by_region_loc = extract_key_and_location(yaml_value, 'by_region', location,
+                                                            expected_types=YamlType.MAPPING)
+        by_lang, by_lang_loc = extract_key_and_location(yaml_value, 'by_lang', location,
+                                                        expected_types=YamlType.MAPPING)
+        by_prefix, by_prefix_loc = extract_key_and_location(yaml_value, 'by_prefix', location,
+                                                            expected_types=YamlType.MAPPING)
 
-    def extract(self, path: pathlib.Path) -> str:
-        return self.pattern.sub(self.replacement, path.name)
+        return GroupingConfig(
+            group_by,
+            GroupByGameConfig.from_yaml(by_game, by_game_loc, group_by),
+            GroupByRegionConfig.from_yaml(by_region, by_region_loc, group_by),
+            GroupByLangConfig.from_yaml(by_lang, by_lang_loc, group_by),
+            GroupByPrefixConfig.from_yaml(by_prefix, by_prefix_loc, group_by)
+        )
+
+    def is_enabled(self):
+        return len(self.group_by) > 0
 
 
 @dataclass
-class DirLetterConfig:
-    enabled: bool
-    letter_count: int = 1
-    limit: int|None = None
-    group: bool = False
+class GroupByGameConfig:
+    strip_regions: bool = False
+    strip_langs: bool = False
+    custom_mapping: dict[str, list[Pattern]] = field(default_factory=dict)
+    disable_if_single_rom: bool = False
+
+    @staticmethod
+    def from_yaml(yaml_value: Any, location: Location, group_by: list[GroupType]) -> GroupByGameConfig | None:
+        if yaml_value is None:
+            if GroupType.GAME in group_by:
+                return GroupByGameConfig()
+            else:
+                return None
+
+        validate_type(yaml_value, YamlType.MAPPING, location)
+        strip_regions = extract_key(yaml_value, 'strip_regions', location, default=False, expected_types=YamlType.BOOL)
+        strip_langs = extract_key(yaml_value, 'strip_langs', location, default=False, expected_types=YamlType.BOOL)
+        disable_if_single_rom = extract_key(yaml_value, 'disable_if_single_rom',
+                                            location, default=False, expected_types=YamlType.BOOL)
+
+        custom_mapping_raw, custom_mapping_loc = extract_key_and_location(
+            yaml_value, 'custom_mappings', location, default={}, expected_types=YamlType.MAPPING)
+
+        custom_mapping = {
+            key: Pattern.from_yaml_list(value, key_loc)
+            for key, value, key_loc in enumerate_mapping(custom_mapping_raw, custom_mapping_loc)
+        }
+        return GroupByGameConfig(strip_regions, strip_langs, custom_mapping, disable_if_single_rom)
 
 
-def _build_destination(rom_folder: RomSet, root_folder: pathlib.Path | None, destination: str | None) -> pathlib.Path:
-    if destination is None:
-        destination = rom_folder.path
+@dataclass
+class GroupByLangConfig:
+    one_lang_per_rom: bool = False
+    lang_ordering: list[str] = field(default_factory=list)
+    disable_if_single_lang: bool = False
 
-    if destination.startswith('/'):
-        return pathlib.Path(destination[1:])
-    elif root_folder is None:
-        return pathlib.Path(destination)
-    else:
-        return root_folder / pathlib.Path(destination)
+    @staticmethod
+    def from_yaml(yaml_value: Any, location: Location, group_by: list[GroupType]) -> GroupByLangConfig | None:
+        if yaml_value is None:
+            if GroupType.LANG in group_by:
+                return GroupByLangConfig()
+            else:
+                return None
+
+        validate_type(yaml_value, YamlType.MAPPING, location)
+        disable_if_single_lang = extract_key(yaml_value, 'disable_if_single_lang', location,
+                                             default=False, expected_types=YamlType.BOOL)
+        one_lang_per_rom = extract_key(yaml_value, 'one_lang_per_rom', location,
+                                       default=False, expected_types=YamlType.BOOL)
+        lang_ordering = extract_key(yaml_value, 'lang_ordering', location, default=[], expected_types=YamlType.SEQ)
+        return GroupByLangConfig(one_lang_per_rom, lang_ordering, disable_if_single_lang)
+
+
+@dataclass
+class GroupByRegionConfig:
+    one_region_per_rom: bool = False
+    region_ordering: list[str] = field(default_factory=list)
+    disable_if_single_region: bool = False
+
+    @staticmethod
+    def from_yaml(yaml_value: Any, location: Location, group_by: list[GroupType]) -> GroupByRegionConfig | None:
+        if yaml_value is None:
+            if GroupType.REGION in group_by:
+                return GroupByRegionConfig()
+            else:
+                return None
+
+        validate_type(yaml_value, YamlType.MAPPING, location)
+        disable_if_single_region = extract_key(yaml_value, 'disable_if_single_region', location,
+                                               default=False, expected_types=YamlType.BOOL)
+        one_region_per_rom = extract_key(yaml_value, 'one_region_per_rom', location,
+                                         default=False, expected_types=YamlType.BOOL)
+        region_ordering = extract_key(yaml_value, 'region_ordering', location, default=[], expected_types=YamlType.SEQ)
+        return GroupByRegionConfig(one_region_per_rom, region_ordering, disable_if_single_region)
+
+
+@dataclass
+class GroupByPrefixConfig:
+    length: int = 1
+    limit: int | None = None
+    create_ranges: bool = False
+    disable_if_single_range: bool = False
+
+    @staticmethod
+    def from_yaml(yaml_value: Any, location: Location, group_by: list[GroupType]) -> GroupByPrefixConfig | None:
+        if yaml_value is None:
+            if GroupType.LETTER in group_by:
+                return GroupByPrefixConfig()
+            else:
+                return None
+
+        validate_type(yaml_value, YamlType.MAPPING, location)
+        length = extract_key(yaml_value, 'length', location, default=1, expected_types=YamlType.INT)
+        limit = extract_key(yaml_value, 'limit', location, expected_types=YamlType.INT)
+        create_ranges = extract_key(yaml_value, 'create_ranges', location, default=False, expected_types=YamlType.BOOL)
+        disable_if_single_range = extract_key(yaml_value, 'disable_if_single_range', location,
+                                              default=False, expected_types=YamlType.BOOL)
+        return GroupByPrefixConfig(length, limit, create_ranges, disable_if_single_range)
