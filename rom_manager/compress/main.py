@@ -15,6 +15,7 @@ from rich.live import Live
 from .progress import CompressProgressTracker
 from .. import Metadata, RomSet, ParseError, replace_suffix, get_metadata_file_path
 
+CD_SIZE_LIMIT = 800 * 1024 * 1024
 
 class CompressionFormat(StrEnum):
     CHD = 'chd'
@@ -289,7 +290,11 @@ def run_chdman(chdman_path: pathlib.Path,
     if compress_file.input_file.suffix.casefold() in ['.gdi', '.cue']:
         format = 'createcd'
     else:
-        format = 'createdvd'
+        # Assume a file larger than 800 MB is a dvd image, and anything smaller is a cd
+        if compress_file.input_file.stat().st_size > CD_SIZE_LIMIT:
+            format = 'createdvd'
+        else:
+            format = 'createcd'
     args = [str(chdman_path), format, '-i', str(compress_file.input_file), '-o', str(compress_file.output_file)]
     _execute_process(compress_file.input_file, args, True)
 
