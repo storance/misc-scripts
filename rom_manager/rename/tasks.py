@@ -3,7 +3,7 @@ import logging
 
 from .common import RenameTarget
 from .dat import GameRomPair
-from .. import Game, Rom, rename_file, replace_stem, get_stem, rename_bin_files_in_cue
+from .. import RomFile, DatRom, rename_file, replace_stem, get_stem, rename_bin_files_in_cue
 
 
 class RenameTask:
@@ -208,7 +208,7 @@ def _build_cue_rename_task(input_directory: pathlib.Path,
     return tasks
 
 
-def _find_rom(sha1: str, game: Game) -> Rom | None:
+def _find_rom(sha1: str, game: RomFile) -> DatRom | None:
     for rom in game.roms:
         if rom.sha1 == sha1:
             return rom
@@ -216,7 +216,7 @@ def _find_rom(sha1: str, game: Game) -> Rom | None:
     return None
 
 
-def _find_cue_file_rom(game: Game) -> Rom | None:
+def _find_cue_file_rom(game: RomFile) -> DatRom | None:
     for rom in game.roms:
         if rom.name.casefold().endswith('.cue'):
             return rom

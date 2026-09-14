@@ -7,11 +7,12 @@ from .pattern import Pattern
 from .common import ParseError, Location, YamlType, extract_key, extract_key_and_location, \
     enumerate_seq, enumerate_mapping, validate_type
 from .metadata import Metadata, RomSet
+from .regions import Region, lookup_region
 
 
 @dataclass
 class Profile:
-    folders: list[ProfileFolder]
+    outputs: list[ProfileOutput]
 
     @classmethod
     def load_from_file(cls, file: pathlib.Path, metadata: Metadata) -> Profile:
@@ -25,60 +26,93 @@ class Profile:
     def from_yaml(yaml_value: Any, location: Location, metadata: Metadata) -> Profile:
         validate_type(yaml_value, YamlType.MAPPING, location)
 
-        folders, folders_loc = extract_key_and_location(yaml_value, 'folders', location,
+        folders, folders_loc = extract_key_and_location(yaml_value, 'outputs', location,
                                                         required=True,
                                                         expected_types=YamlType.SEQ)
 
-        return Profile(ProfileFolder.from_yaml_list(folders, folders_loc, metadata))
+        return Profile(ProfileOutput.from_yaml_list(folders, folders_loc, metadata))
 
 
 @dataclass
-class ProfileFolder:
+class ProfileOutput:
     path: pathlib.Path
     grouping: GroupingConfig | None
-    rom_sets: list[ProfileRomSet]
+    sources: list[ProfileSource]
     delete_excludes: list[Pattern]
 
     @staticmethod
-    def from_yaml(yaml_value: Any, location: Location, metadata: Metadata) -> ProfileFolder:
+    def from_yaml(yaml_value: Any, location: Location, metadata: Metadata) -> ProfileOutput:
         validate_type(yaml_value, YamlType.MAPPING, location)
+
+        if 'sources' in yaml_value and 'source' in yaml_value:
+            raise ParseError('Both "sources" and "source" can not be both specified.', location)
 
         path = extract_key(yaml_value, 'path', location, required=True, expected_types=YamlType.STRING)
         grouping, grouping_loc = extract_key_and_location(
             yaml_value, 'grouping', location, expected_types=YamlType.MAPPING)
-        rom_sets, rom_sets_loc = extract_key_and_location(yaml_value, 'rom_sets', location, expected_types=YamlType.SEQ)
+        source, source_loc = extract_key_and_location(yaml_value, 'source', location, expected_types=YamlType.STRING)
+        if source is not None:
+            profile_sources = [ProfileSource.from_yaml(source, source_loc, metadata)]
+        else:
+            sources, sources_loc = extract_key_and_location(yaml_value, 'sources', location,
+                                                            required=True,
+                                                            expected_types=YamlType.SEQ)
+            profile_sources = ProfileSource.from_yaml_list(sources, sources_loc, metadata)
         delete_excludes, delete_excludes_loc = extract_key_and_location(
-            yaml_value, 'delete_excludes', location, expected_types=YamlType.SEQ)
+            yaml_value, 'delete_excludes', location, default=[], expected_types=YamlType.SEQ)
 
-        return ProfileFolder(
+        return ProfileOutput(
             pathlib.Path(path),
             GroupingConfig.from_yaml(grouping, grouping_loc),
-            ProfileRomSet.from_yaml_list(rom_sets, rom_sets_loc, metadata),
+            profile_sources,
             Pattern.from_yaml_list(delete_excludes, delete_excludes_loc)
         )
 
     @classmethod
-    def from_yaml_list(cls, yaml_values: list[Any], location: Location, metadata: Metadata) -> list[ProfileFolder]:
-        return [cls.from_yaml(value, loc, metadata) for value, loc in enumerate_seq(yaml_values, location)]
+    def from_yaml_list(cls, yaml_values: list[Any], location: Location, metadata: Metadata) -> list[ProfileOutput]:
+        output_paths = {}
+        results = []
+        for value, loc in enumerate_seq(yaml_values, location):
+            profile_output = cls.from_yaml(value, loc, metadata)
+            existing_loc = output_paths.get(profile_output.path)
+            if existing_loc is not None:
+                raise ParseError(
+                    f"Duplicate output path \"{profile_output.path}\". Already defined at {existing_loc.to_compact_str()}:", loc)
+            else:
+                output_paths[profile_output.path] = loc
+                results.append(profile_output)
+
+        return results
+
+    def is_delete_excluded(self, relative_path: pathlib.Path) -> bool:
+        return any(exclude.matches(relative_path) for exclude in self.delete_excludes)
 
 
 @dataclass(frozen=True)
-class ProfileRomSet:
+class ProfileSource:
     rom_set: RomSet
-    includes: list[Pattern]
-    excludes: list[Pattern]
+    includes: list[Pattern] = field(default_factory=list)
+    excludes: list[Pattern] = field(default_factory=list)
 
     @staticmethod
     def from_yaml(yaml_value: Any,
                   location: Location,
-                  metadata: Metadata) -> ProfileRomSet:
-        validate_type(yaml_value, YamlType.MAPPING, location)
-        name, name_loc = extract_key_and_location(yaml_value, 'name', location,
-                                                  required=True,
-                                                  expected_types=YamlType.STRING)
-        rom_set = metadata.find_rom_set(name)
+                  metadata: Metadata) -> ProfileSource:
+        validate_type(yaml_value, [YamlType.MAPPING, YamlType.STRING], location)
+
+        if isinstance(yaml_value, str):
+            rom_set = metadata.find_rom_set(yaml_value)
+            if rom_set is None:
+                raise ParseError(f"Rom set \"{yaml_value}\" does not exist in the metadata.yml", location)
+
+            return ProfileSource(rom_set)
+
+        rom_set_name, rom_set_loc = extract_key_and_location(yaml_value, 'rom_set', location,
+                                                             required=True,
+                                                             expected_types=YamlType.STRING)
+        rom_set = metadata.find_rom_set(rom_set_name)
         if rom_set is None:
-            raise ParseError(f"A rom set with the name '{name}' does not exist in the metadata.yml", name_loc)
+            raise ParseError(f"Rom set \"{yaml_value}\" does not exist in the metadata.yml", rom_set_loc)
 
         includes, includes_loc = extract_key_and_location(yaml_value, 'includes', location,
                                                           default=[],
@@ -87,12 +121,12 @@ class ProfileRomSet:
                                                           default=[],
                                                           expected_types=YamlType.SEQ)
 
-        return ProfileRomSet(rom_set,
+        return ProfileSource(rom_set,
                              Pattern.from_yaml_list(includes, includes_loc),
                              Pattern.from_yaml_list(excludes, excludes_loc))
 
     @classmethod
-    def from_yaml_list(cls, yaml_values: list[Any], location: Location, metadata: Metadata) -> list[ProfileRomSet]:
+    def from_yaml_list(cls, yaml_values: list[Any], location: Location, metadata: Metadata) -> list[ProfileSource]:
         return [cls.from_yaml(value, loc, metadata) for value, loc in enumerate_seq(yaml_values, location)]
 
     def is_excluded(self, relative_path: pathlib.Path) -> bool:
@@ -109,7 +143,7 @@ class GroupType(StrEnum):
     GAME = 'game'
     LANG = 'lang'
     REGION = 'region'
-    LETTER = 'letter'
+    PREFIX = 'prefix'
 
 
 @dataclass
@@ -166,7 +200,7 @@ class GroupByGameConfig:
     strip_regions: bool = False
     strip_langs: bool = False
     custom_mapping: dict[str, list[Pattern]] = field(default_factory=dict)
-    disable_if_single_rom: bool = False
+    flatten_single_rom: bool = False
 
     @staticmethod
     def from_yaml(yaml_value: Any, location: Location, group_by: list[GroupType]) -> GroupByGameConfig | None:
@@ -179,8 +213,8 @@ class GroupByGameConfig:
         validate_type(yaml_value, YamlType.MAPPING, location)
         strip_regions = extract_key(yaml_value, 'strip_regions', location, default=False, expected_types=YamlType.BOOL)
         strip_langs = extract_key(yaml_value, 'strip_langs', location, default=False, expected_types=YamlType.BOOL)
-        disable_if_single_rom = extract_key(yaml_value, 'disable_if_single_rom',
-                                            location, default=False, expected_types=YamlType.BOOL)
+        flatten_single_rom = extract_key(yaml_value, 'flatten_single_rom',
+                                         location, default=False, expected_types=YamlType.BOOL)
 
         custom_mapping_raw, custom_mapping_loc = extract_key_and_location(
             yaml_value, 'custom_mappings', location, default={}, expected_types=YamlType.MAPPING)
@@ -189,14 +223,21 @@ class GroupByGameConfig:
             key: Pattern.from_yaml_list(value, key_loc)
             for key, value, key_loc in enumerate_mapping(custom_mapping_raw, custom_mapping_loc)
         }
-        return GroupByGameConfig(strip_regions, strip_langs, custom_mapping, disable_if_single_rom)
+        return GroupByGameConfig(strip_regions, strip_langs, custom_mapping, flatten_single_rom)
 
 
 @dataclass
 class GroupByLangConfig:
-    one_lang_per_rom: bool = False
-    lang_ordering: list[str] = field(default_factory=list)
-    disable_if_single_lang: bool = False
+    single_per_rom: bool = False
+    prefer: list[str] = field(default_factory=list)
+    flatten_single_lang: bool = False
+
+    prefer_ranks: dict[str, int] = field(init=False)
+
+    def __post_init__(self):
+        self.prefer_ranks = {
+            lang: rank for rank, lang in enumerate(self.prefer)
+        }
 
     @staticmethod
     def from_yaml(yaml_value: Any, location: Location, group_by: list[GroupType]) -> GroupByLangConfig | None:
@@ -207,19 +248,46 @@ class GroupByLangConfig:
                 return None
 
         validate_type(yaml_value, YamlType.MAPPING, location)
-        disable_if_single_lang = extract_key(yaml_value, 'disable_if_single_lang', location,
-                                             default=False, expected_types=YamlType.BOOL)
-        one_lang_per_rom = extract_key(yaml_value, 'one_lang_per_rom', location,
-                                       default=False, expected_types=YamlType.BOOL)
-        lang_ordering = extract_key(yaml_value, 'lang_ordering', location, default=[], expected_types=YamlType.SEQ)
-        return GroupByLangConfig(one_lang_per_rom, lang_ordering, disable_if_single_lang)
+        flatten_single_lang = extract_key(yaml_value, 'flatten_single_lang', location,
+                                          default=False, expected_types=YamlType.BOOL)
+        single_per_rom = extract_key(yaml_value, 'single_per_rom', location,
+                                     default=False, expected_types=YamlType.BOOL)
+        prefer, prefer_loc = extract_key_and_location(
+            yaml_value, 'prefer', location, default=[], expected_types=YamlType.SEQ)
+
+        if single_per_rom and len(prefer) == 0:
+            raise ParseError('You must specify a prefer list of languages when single_per_rom is enabled', prefer_loc)
+        return GroupByLangConfig(single_per_rom, prefer, flatten_single_lang)
+
+
+class MultiRegionMode(StrEnum):
+    PRESERVE = 'preserve'
+    EXPAND_TO_COUNTRIES = 'expand-to-countries'
+    COLLAPSE_TO_GROUPED = 'collapse-to-grouped'
+
+    @staticmethod
+    def from_yaml(yaml_value: str, location: Location) -> MultiRegionMode:
+        try:
+            return MultiRegionMode(yaml_value)
+        except ValueError:
+            raise ParseError(f"Unknown region handling '{yaml_value}", location)
 
 
 @dataclass
 class GroupByRegionConfig:
-    one_region_per_rom: bool = False
-    region_ordering: list[str] = field(default_factory=list)
-    disable_if_single_region: bool = False
+    single_per_rom: bool = False
+    prefer: list[Region] = field(default_factory=list)
+    flatten_single_region: bool = False
+    use_short_names: bool = False
+    world_mode: MultiRegionMode = MultiRegionMode.PRESERVE
+    europe_mode: MultiRegionMode = MultiRegionMode.PRESERVE
+    asia_mode: MultiRegionMode = MultiRegionMode.PRESERVE
+    prefer_ranks: dict[Region, int] = field(init=False)
+
+    def __post_init__(self):
+        self.prefer_ranks = {
+            lang: rank for rank, lang in enumerate(self.prefer)
+        }
 
     @staticmethod
     def from_yaml(yaml_value: Any, location: Location, group_by: list[GroupType]) -> GroupByRegionConfig | None:
@@ -230,25 +298,44 @@ class GroupByRegionConfig:
                 return None
 
         validate_type(yaml_value, YamlType.MAPPING, location)
-        disable_if_single_region = extract_key(yaml_value, 'disable_if_single_region', location,
-                                               default=False, expected_types=YamlType.BOOL)
-        one_region_per_rom = extract_key(yaml_value, 'one_region_per_rom', location,
-                                         default=False, expected_types=YamlType.BOOL)
-        region_ordering = extract_key(yaml_value, 'region_ordering', location, default=[], expected_types=YamlType.SEQ)
-        return GroupByRegionConfig(one_region_per_rom, region_ordering, disable_if_single_region)
+        flatten_single_region = extract_key(yaml_value, 'flatten_single_region', location,
+                                            default=False, expected_types=YamlType.BOOL)
+        single_per_rom = extract_key(yaml_value, 'single_per_rom', location,
+                                     default=False, expected_types=YamlType.BOOL)
+        use_short_names = extract_key(yaml_value, 'use_short_names', location,
+                                      default=False, expected_types=YamlType.BOOL)
+        world_mode = MultiRegionMode.from_yaml(*extract_key_and_location(
+            yaml_value, 'world_mode', location, default=MultiRegionMode.PRESERVE))
+        europe_mode = MultiRegionMode.from_yaml(*extract_key_and_location(
+            yaml_value, 'europe_mode', location, default=MultiRegionMode.PRESERVE))
+        asia_mode = MultiRegionMode.from_yaml(*extract_key_and_location(
+            yaml_value, 'asia_mode', location, default=MultiRegionMode.PRESERVE))
+        raw_prefer, prefer_loc = extract_key_and_location(
+            yaml_value, 'prefer', location, default=[], expected_types=YamlType.SEQ)
+
+        prefer = []
+        for region_name in raw_prefer:
+            region = lookup_region(region_name)
+            if region is None:
+                raise ParseError(f"Unsupported or invalid region \"{region_name}\"", prefer_loc)
+            prefer.append(region)
+
+        if single_per_rom and len(prefer) == 0:
+            raise ParseError('You must specify a prefer list of regions when single_per_rom is enabled', prefer_loc)
+        return GroupByRegionConfig(single_per_rom, prefer, flatten_single_region, use_short_names, world_mode, europe_mode, asia_mode)
 
 
 @dataclass
 class GroupByPrefixConfig:
     length: int = 1
     limit: int | None = None
-    create_ranges: bool = False
-    disable_if_single_range: bool = False
+    collapse_prefixes: bool = False
+    flatten_single_prefix: bool = False
 
     @staticmethod
     def from_yaml(yaml_value: Any, location: Location, group_by: list[GroupType]) -> GroupByPrefixConfig | None:
         if yaml_value is None:
-            if GroupType.LETTER in group_by:
+            if GroupType.PREFIX in group_by:
                 return GroupByPrefixConfig()
             else:
                 return None
@@ -256,7 +343,12 @@ class GroupByPrefixConfig:
         validate_type(yaml_value, YamlType.MAPPING, location)
         length = extract_key(yaml_value, 'length', location, default=1, expected_types=YamlType.INT)
         limit = extract_key(yaml_value, 'limit', location, expected_types=YamlType.INT)
-        create_ranges = extract_key(yaml_value, 'create_ranges', location, default=False, expected_types=YamlType.BOOL)
-        disable_if_single_range = extract_key(yaml_value, 'disable_if_single_range', location,
-                                              default=False, expected_types=YamlType.BOOL)
-        return GroupByPrefixConfig(length, limit, create_ranges, disable_if_single_range)
+        collapse_prefixes = extract_key(yaml_value, 'collapse_prefixes', location,
+                                        default=False, expected_types=YamlType.BOOL)
+        flatten_single_prefix = extract_key(yaml_value, 'flatten_single_prefix', location,
+                                            default=False, expected_types=YamlType.BOOL)
+
+        if limit is None and collapse_prefixes:
+            raise ParseError("A limit must be specified when collapse prefixes is enabled", location)
+
+        return GroupByPrefixConfig(length, limit, collapse_prefixes, flatten_single_prefix)

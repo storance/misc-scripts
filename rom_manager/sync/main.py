@@ -87,7 +87,7 @@ def sync_roms(console: Console, args: argparse.Namespace):
             logging.error("%s\n  in %s", e, e.location)
             sys.exit(1)
         except Exception as e:
-            logging.error("Failed to read \"%s\": %s", metadata_file, str(e))
+            logging.exception("Failed to read \"%s\": %s", metadata_file, str(e))
             sys.exit(1)
 
         if args.profile_path:
@@ -107,7 +107,7 @@ def sync_roms(console: Console, args: argparse.Namespace):
             logging.error("%s\n  in %s", e, e.location)
             sys.exit(1)
         except Exception as e:
-            logging.error("Failed to read \"%s\": %s", profile_path, str(e))
+            logging.exception("Failed to read \"%s\": %s", profile_path, str(e))
             sys.exit(1)
 
         try:
@@ -158,6 +158,22 @@ def _execute_plan(progress_tracker: SyncProgressTracker,
 
     progress_tracker.execute_plan(total_to_delete, len(plan.rename_tasks), len(plan.copy_tasks))
 
+    if plan.rename_tasks:
+        progress_tracker.start_rename()
+        try:
+            for rename_task in plan.rename_tasks:
+                logging.info("Renaming \"%s\" to \"%s\".", rename_task.src, rename_task.dst)
+                try:
+                    rename_file(rename_task.src, rename_task.dst)
+                except OSError as e:
+                    logging.error("Failed to rename file \"%s\": %s.", rename_task.src, str(e))
+                progress_tracker.advance_rename()
+        except Exception as e:
+            progress_tracker.fail_delete()
+            logging.error("Failed to rename files: %s", str(e))
+            sys.exit(1)
+        progress_tracker.stop_rename()
+
     if plan.delete_dir_tasks or plan.delete_file_tasks:
         progress_tracker.start_delete()
         try:
@@ -182,22 +198,6 @@ def _execute_plan(progress_tracker: SyncProgressTracker,
             sys.exit(1)
 
         progress_tracker.stop_delete()
-
-    if plan.rename_tasks:
-        progress_tracker.start_rename()
-        try:
-            for rename_task in plan.rename_tasks:
-                logging.info("Renaming \"%s\" to \"%s\".", rename_task.src, rename_task.dst)
-                try:
-                    rename_file(rename_task.src, rename_task.dst)
-                except OSError as e:
-                    logging.error("Failed to rename file \"%s\": %s.", rename_task.src, str(e))
-                progress_tracker.advance_rename()
-        except Exception as e:
-            progress_tracker.fail_delete()
-            logging.error("Failed to rename files: %s", str(e))
-            sys.exit(1)
-        progress_tracker.stop_rename()
 
     if plan.copy_tasks:
         progress_tracker.start_copy()

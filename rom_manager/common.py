@@ -5,6 +5,7 @@ import random
 import pathlib
 import datetime
 import unicodedata
+from enum import StrEnum
 from typing import Any
 from enum import StrEnum
 from collections.abc import Generator
@@ -29,6 +30,9 @@ class Location:
             return f"\"{self.file}\""
 
         return f"\"{self.file}\", line {self.line}"
+
+    def to_compact_str(self):
+        return f"{self.file}:{'Unknown' if self.line is None else self.line}"
 
     def child_key(self, key: str, line: int | None) -> Location:
         if self.field is None:
@@ -68,7 +72,6 @@ def extract_location_for_index(l: list, idx: int, parent: Location) -> Location:
 
 def extract_key(*args, **kwargs) -> Any:
     return extract_key_and_location(*args, **kwargs)[0]
-
 
 def extract_key_and_location(mapping: dict,
                              key: str,

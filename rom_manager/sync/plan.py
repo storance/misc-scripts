@@ -3,10 +3,12 @@ import logging
 
 from typing import Generator
 from dataclasses import dataclass
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from .common import HashFileSource, OverwriteCheck, DotFilesMode
+from .common import HashFileSource, OverwriteCheck, DotFilesMode, SrcDestPair
+from .grouping import Grouping, create_groupers
 from .progress import SyncProgressTracker
-from .. import Profile, sha1_hash_file, SHA1_EXT
+from .. import Profile, ProfileOutput, ProfileSource, sha1_hash_file, SHA1_EXT
 
 __all__ = ['Plan', 'SrcDestPair', 'DotFilesMode', 'create_plan']
 
@@ -23,12 +25,6 @@ class Plan:
             not self.delete_dir_tasks and not self.delete_file_tasks
 
 
-@dataclass(frozen=True)
-class SrcDestPair:
-    src: pathlib.Path
-    dst: pathlib.Path
-
-
 def create_plan(progress_tracker: SyncProgressTracker,
                 src_path: pathlib.Path,
                 dst_path: pathlib.Path,
@@ -39,117 +35,175 @@ def create_plan(progress_tracker: SyncProgressTracker,
                 thread_count: int) -> Plan:
     progress_tracker.start_plan()
 
-    copy_candidates = _scan_source(src_path, dst_path, profile, dot_files_mode)
+    copy_candidates_by_folder = _scan_sources(src_path, dst_path, profile, dot_files_mode)
     if delete or overwrite_check == OverwriteCheck.HASH:
-        destination_files = _scan_dir(_list_all_dst_paths(dst_path, profile))
+        destination_files = _scan_destinations(dst_path, profile)
     else:
-        destination_files = []
+        destination_files = {}
 
     rename_tasks = []
     hashes = {}
     if overwrite_check == OverwriteCheck.HASH:
-        hashes = _hash_files(progress_tracker, profile, thread_count, copy_candidates, destination_files)
-        rename_tasks = _find_rename_targets(copy_candidates, destination_files, hashes)
+        hashes = _hash_files(progress_tracker, thread_count, dot_files_mode,
+                             copy_candidates_by_folder, destination_files)
+        rename_tasks = _find_rename_targets(copy_candidates_by_folder, destination_files, hashes)
 
     delete_file_tasks = []
     delete_dir_tasks = []
     if delete:
         delete_file_tasks, delete_dir_tasks = _filter_files_to_delete(dst_path,
-                                                                      profile,
                                                                       dot_files_mode,
-                                                                      copy_candidates,
+                                                                      copy_candidates_by_folder,
                                                                       rename_tasks,
                                                                       destination_files)
 
-    copy_tasks = list(_filter_copy_tasks(copy_candidates, rename_tasks, overwrite_check, hashes))
+    copy_tasks = list(_filter_copy_tasks(copy_candidates_by_folder, rename_tasks, overwrite_check, hashes))
 
     progress_tracker.complete_plan()
 
     return Plan(delete_file_tasks, delete_dir_tasks, copy_tasks, rename_tasks)
 
 
-def _scan_source(src_path: pathlib.Path,
-                 dst_path: pathlib.Path,
-                 profile: Profile,
-                 dot_files_mode: DotFilesMode) -> list[SrcDestPair]:
-    copy_tasks = set()
-    for rom_set_config in profile.rom_sets:
-        scan_dir = src_path / rom_set_config.rom_set.path
-        logging.debug("Using rom folder %s to scan \"%s\" for roms with extensions: %s",
-                      rom_set_config.rom_set.name,
-                      scan_dir,
-                      ', '.join(rom_set_config.rom_set.extensions))
-        if not scan_dir.exists() or not scan_dir.is_dir():
-            logging.warning(f"Source rom folder \"{scan_dir}\" does not exist or is not a directory. Skipping.")
+def _scan_sources(src_path: pathlib.Path,
+                  dst_path: pathlib.Path,
+                  profile: Profile,
+                  dot_files_mode: DotFilesMode) -> dict[pathlib.Path, list[SrcDestPair]]:
+    src_dst_pairs: dict[pathlib.Path, list[SrcDestPair]] = {}
+    for output in profile.outputs:
+        src_dst_pairs[output.path] = []
+
+        grouper = create_groupers(output.grouping) if output.grouping else None
+        results = []
+        for source in output.sources:
+            _scan_profile_source(src_path, source, dot_files_mode, results)
+
+        results = _filter_duplicate_entries(results)
+
+        folder_dst_path = dst_path / output.path
+        if grouper:
+            for group in grouper.create_group(src_path, results):
+                if isinstance(group, Grouping):
+                    src_dst_pairs[output.path].extend(group.to_src_dst_pairs(folder_dst_path))
+                else:
+                    src_dst_pairs[output.path].append(SrcDestPair(group, folder_dst_path / group.name))
+        else:
+            for result in results:
+                src_dst_pairs[output.path].append(SrcDestPair(result, folder_dst_path / result.name))
+
+        src_dst_pairs[output.path] = sorted(src_dst_pairs[output.path], key=lambda p: p.src.name)
+
+    return src_dst_pairs
+
+
+def _scan_profile_source(src_path: pathlib.Path,
+                         source: ProfileSource,
+                         dot_files_mode: DotFilesMode,
+                         results: list[pathlib.Path]):
+    scan_dir = src_path / source.rom_set.path
+    logging.debug("Scanning rom set \"%s\" in folder \"%s\" for roms with extensions: %s",
+                  scan_dir,
+                  source.rom_set.name,
+                  ', '.join(source.rom_set.extensions))
+    if not scan_dir.exists() or not scan_dir.is_dir():
+        logging.warning(f"Source rom folder \"{scan_dir}\" does not exist or is not a directory. Skipping.")
+        return
+
+    glob_pattern = "**" if source.rom_set.recursive else "*"
+    for file in scan_dir.glob(glob_pattern):
+        relative_path = file.relative_to(scan_dir)
+        if not file.is_file():
             continue
 
-        glob_pattern = "**" if rom_set_config.rom_set.recursive else "*"
+        if not source.rom_set.is_included(file):
+            logging.debug("Skipping file \"%s\" in rom set \"%s\" as it does not end with a desired extension.",
+                          relative_path, source.rom_set.name)
+            continue
 
-        for file in scan_dir.glob(glob_pattern):
-            if not file.is_file():
-                continue
+        if not dot_files_mode.should_copy() and file.name.startswith("."):
+            logging.debug("Skipping file \"%s\" in rom set \"%s\" as copying dot files is disabled.",
+                          relative_path, source.rom_set.name)
+            continue
 
-            if not rom_set_config.rom_set.is_included(file):
-                logging.debug("Skipping file \"%s\" as it does not end with a desired extension.", file)
-                continue
+        relative_path = file.relative_to(scan_dir)
+        if source.rom_set.is_excluded(relative_path):
+            logging.debug("Skipping file \"%s\" in rom set \"%s\" as it matches the exclude pattern of the rom set.",
+                          relative_path, source.rom_set.name)
+            continue
 
-            if not dot_files_mode.should_copy() and file.name.startswith("."):
-                logging.debug("Skipping file \"%s\" as copying dot files is disabled.", file)
-                continue
+        if source.is_excluded(relative_path):
+            logging.debug("Skipping file \"%s\" in rom set \"%s\" as it matches an exclude pattern of the profile source.",
+                          relative_path, source.rom_set.name)
+            continue
 
-            relative_path = file.relative_to(scan_dir)
-            if rom_set_config.rom_set.is_excluded(relative_path):
-                logging.debug("Skipping file \"%s\" as it matches the exclude pattern of the rom set.", file)
-                continue
+        if not source.is_included(relative_path):
+            logging.debug("Skipping file \"%s\" in rom set \"%s\" as does not match any include pattern of the profile source.",
+                          relative_path, source.rom_set.name)
+            continue
 
-            if rom_set_config.is_excluded(relative_path):
-                logging.debug("Skipping file \"%s\" as it matches an exclude pattern of the profile.", file)
-                continue
-
-            if not rom_set_config.is_included(relative_path):
-                logging.debug("Skipping file \"%s\" as does not match any include pattern of the profile.", file)
-                continue
-
-            rom_dst_path = (dst_path / rom_set_config.get_relative_destination(relative_path)).resolve()
-            if not rom_dst_path.is_relative_to(dst_path):
-                raise ValueError(
-                    f"Rom destination path \"{rom_dst_path}\" is not relative to the configured destination folder \"{dst_path}\"")
-
-            logging.debug("Including \"%s\" for possible copying to \"%s\".", file, rom_dst_path)
-            copy_tasks.add(SrcDestPair(file, rom_dst_path))
-
-    return sorted(list(copy_tasks), key=lambda t: t.src)
+        logging.debug("Found \"%s\" from scanning rom set \"%s\"", file, source.rom_set.name)
+        results.append(file)
 
 
-def _list_all_dst_paths(dst_path, profile) -> list[pathlib.Path]:
-    copy_tasks = set()
-    for profile_rom_set in profile.rom_sets:
-        dst_rom_set_path = dst_path / profile_rom_set.destination
-        if dst_rom_set_path.exists() and dst_rom_set_path.is_dir():
-            copy_tasks.add(dst_rom_set_path)
-
-    return sorted(copy_tasks)
-
-
-def _scan_dir(scan_dirs: list[pathlib.Path]) -> list[pathlib.Path]:
+def _filter_duplicate_entries(files: list[pathlib.Path]) -> list[pathlib.Path]:
+    unique_names = set()
     results = []
+    for file in files:
+        if file.name not in unique_names:
+            unique_names.add(file.name)
+            results.append(file)
+        else:
+            logging.debug('Skipping \"%s\" since it was duplicated by another rom set', file)
 
-    for scan_dir in scan_dirs:
-        for root_path, _, filenames in scan_dir.walk():
-            for file in filenames:
+    return results
+
+
+def _scan_destinations(dst_path: pathlib.Path,
+                       profile: Profile) -> dict[pathlib.Path, list[pathlib.Path]]:
+    results = {}
+    for output in profile.outputs:
+        results[output.path] = _scan_destination(dst_path, output)
+
+    return results
+
+
+def _scan_destination(dst_path: pathlib.Path,
+                      output: ProfileOutput) -> list[pathlib.Path]:
+
+    scan_dir = dst_path / output.path
+    results = []
+    for root_path, _, filenames in scan_dir.walk():
+        for file in filenames:
+            full_path = root_path / file
+            relative_path = full_path.relative_to(scan_dir)
+
+            if not output.is_delete_excluded(relative_path):
                 results.append(root_path / file)
-
+            else:
+                logging.debug("Skipping \"%s\" in the output directory since it's explicitly excluded from deletion.",
+                              full_path)
     return sorted(results)
 
 
 def _hash_files(progress_tracker: SyncProgressTracker,
-                profile: Profile,
                 thread_count: int,
-                copy_candidates: list[SrcDestPair],
-                dst_files: list[pathlib.Path]) -> dict[pathlib.Path, str]:
-    src_files_to_hash = set(copy_task.src for copy_task in copy_candidates)
-    dst_files_to_hash = set(copy_task.dst for copy_task in copy_candidates if copy_task.dst.exists())
-    dst_files_to_hash.update(_filter_dest_files_to_hash(profile, dst_files))
+                dot_files_mode: DotFilesMode,
+                copy_candidates: dict[pathlib.Path, list[SrcDestPair]],
+                dst_files: dict[pathlib.Path, list[pathlib.Path]]) -> dict[pathlib.Path, str]:
+    src_files_to_hash = set()
+    dst_files_to_hash = set()
+    for copy_task in _iter_copy_candidates(copy_candidates):
+        src_files_to_hash.add(copy_task.src)
+        if copy_task.dst.exists():
+            dst_files_to_hash.add(copy_task.dst)
+
+    for file in _iter_destination_files(dst_files):
+        # if we're not copying dot files then we don't need to hash them
+        if file.name.startswith('.') and not dot_files_mode.should_copy():
+            continue
+
+        # ignore the MacOS metadata files that start with "._" and .sha1 files
+        if not file.name.startswith("._") and not file.suffix == SHA1_EXT:
+            dst_files_to_hash.add(file)
 
     if len(dst_files_to_hash) == 0:
         logging.debug("No files found that need to be hashed in the destination folder.")
@@ -181,55 +235,46 @@ def _hash_files(progress_tracker: SyncProgressTracker,
     return hashes
 
 
-def _filter_dest_files_to_hash(profile: Profile, dst_files: list[pathlib.Path]) -> Generator[pathlib.Path, None, None]:
-    """Filter destination files to only include those that match any of the extensions in the profile's rom folders. """
-    for file in dst_files:
-        # ignore the MacOS metadata files that start with "._"
-        if profile.is_interested_ext(file) and not file.name.startswith("._"):
-            yield file
-
-
-def _find_rename_targets(copy_candidates: list[SrcDestPair],
-                         dst_files: list[pathlib.Path],
+def _find_rename_targets(copy_candidates: dict[pathlib.Path, list[SrcDestPair]],
+                         dst_files: dict[pathlib.Path, list[pathlib.Path]],
                          hashes_by_path: dict[pathlib.Path, str]) -> list[SrcDestPair]:
     """Find ROM files that can be renamed by checking if their sha1 hash matches and they are in the same directory."""
     results = []
 
-    paths_by_hash = {}
-    for path in dst_files:
-        sha1 = hashes_by_path.get(path)
-        if sha1 is None:
-            continue
+    paths_by_hash = defaultdict(lambda: defaultdict(list))
+    for folder, files in dst_files.items():
+        for file in files:
+            sha1 = hashes_by_path.get(file)
+            if sha1 is None:
+                continue
 
-        if sha1 not in paths_by_hash:
-            paths_by_hash[sha1] = []
+            paths_by_hash[folder][sha1].append(file)
 
-        paths_by_hash[sha1].append(path)
+    for folder, copy_tasks in copy_candidates.items():
+        for copy_task in copy_tasks:
+            if copy_task.dst.exists():
+                logging.debug(
+                    "Destination file \"%s\" already exists. Will not attempt to find a rename target.", copy_task.dst)
+                continue
 
-    for copy_task in copy_candidates:
-        if copy_task.dst.exists():
-            logging.debug("Destination file \"%s\" already exists. Will not attempt to find a rename target.", copy_task.dst)
-            continue
+            sha1 = hashes_by_path.get(copy_task.src)
+            if sha1 is None:
+                continue
 
-        sha1 = hashes_by_path.get(copy_task.src)
-        if sha1 is None:
-            continue
-
-        candidate_renames = paths_by_hash.get(sha1, [])
-        # find the first matching file that is in the same directory as the desired destination path
-        rename_src = next((c for c in candidate_renames if c.parent.samefile(copy_task.dst.parent)), None)
-        if rename_src is not None:
-            logging.debug("Found rename candidate \"%s\" for \"%s\": SHA1 hash %s matches.",
-                          rename_src, copy_task.dst, sha1)
-            results.append(SrcDestPair(rename_src, copy_task.dst))
-        else:
-            logging.debug("No rename candidate found for \"%s\": No files found with matching SHA1 hash %s.",
-                          copy_task.dst, sha1)
+            candidate_renames = paths_by_hash[folder][sha1]
+            if candidate_renames:
+                rename_src = candidate_renames[0]
+                logging.debug("Found rename candidate \"%s\" for \"%s\": SHA1 hash %s matches.",
+                              rename_src, copy_task.dst, sha1)
+                results.append(SrcDestPair(rename_src, copy_task.dst))
+            else:
+                logging.debug("No rename candidate found for \"%s\": No files found with matching SHA1 hash %s.",
+                              copy_task.dst, sha1)
 
     return results
 
 
-def _filter_copy_tasks(copy_candidates: list[SrcDestPair],
+def _filter_copy_tasks(copy_candidates: dict[pathlib.Path, list[SrcDestPair]],
                        rename_tasks: list[SrcDestPair],
                        overwrite_check: OverwriteCheck,
                        hashes_by_path: dict[pathlib.Path, str]) -> Generator[SrcDestPair, None, None]:
@@ -243,92 +288,107 @@ def _filter_copy_tasks(copy_candidates: list[SrcDestPair],
     # any copy task whose destination is in this set can be filtered out
     rename_task_dests = set(pair.dst for pair in rename_tasks)
 
-    for copy_task in copy_candidates:
-        if overwrite_check == OverwriteCheck.ALWAYS:
-            logging.debug("Adding copy \"%s\" -> \"%s\" as task: Overwrite mode is always.",
-                          copy_task.src, copy_task.dst)
-            yield copy_task
-        elif copy_task.dst.exists():
-            # check if the src and dst files are different
-            # if we have sha1 hashes, use those to check if the files are different
-            # otherwise, use the file size and modification times
-            if overwrite_check == OverwriteCheck.HASH:
-                src_hash = hashes_by_path.get(copy_task.src)
-                dst_hash = hashes_by_path.get(copy_task.dst)
+    for copy_tasks in copy_candidates.values():
+        for copy_task in copy_tasks:
+            if overwrite_check == OverwriteCheck.ALWAYS:
+                logging.debug("Adding copy \"%s\" -> \"%s\" as task: Overwrite mode is always.",
+                              copy_task.src, copy_task.dst)
+                yield copy_task
+            elif copy_task.dst.exists():
+                # check if the src and dst files are different
+                # if we have sha1 hashes, use those to check if the files are different
+                # otherwise, use the file size and modification times
+                if overwrite_check == OverwriteCheck.HASH:
+                    src_hash = hashes_by_path.get(copy_task.src)
+                    dst_hash = hashes_by_path.get(copy_task.dst)
 
-                if src_hash != dst_hash:
-                    logging.debug("Adding copy \"%s\" -> \"%s\" as task: sha1 %s does not match %s.",
-                                  copy_task.src, copy_task.dst, src_hash, dst_hash)
-                    yield copy_task
-                else:
-                    logging.debug("Skipping copy \"%s\" -> \"%s\": sha1 hashes (%s) match.",
-                                  copy_task.src, copy_task.dst, src_hash)
-            elif overwrite_check in [OverwriteCheck.SIZE_OR_TIME, OverwriteCheck.SIZE]:
-                src_stat = copy_task.src.stat()
-                dst_stat = copy_task.dst.stat()
-
-                if src_stat.st_size != dst_stat.st_size:
-                    logging.debug("Adding copy \"%s\" -> \"%s\" as task: file size %d does not match %d.",
-                                  copy_task.src, copy_task.dst, src_stat.st_size, dst_stat.st_size)
-                    yield copy_task
-                elif overwrite_check == OverwriteCheck.SIZE_OR_TIME:
-                    if src_stat.st_mtime > dst_stat.st_mtime:
-                        logging.debug("Adding copy \"%s\" -> \"%s\" as task: source was modified more recently.",
-                                      copy_task.src, copy_task.dst)
+                    if src_hash != dst_hash:
+                        logging.debug("Adding copy \"%s\" -> \"%s\" as task: sha1 %s does not match %s.",
+                                      copy_task.src, copy_task.dst, src_hash, dst_hash)
                         yield copy_task
                     else:
-                        logging.debug("Skipping copy \"%s\" -> \"%s\": source was not modified more recently.",
+                        logging.debug("Skipping copy \"%s\" -> \"%s\": sha1 hashes (%s) match.",
+                                      copy_task.src, copy_task.dst, src_hash)
+                elif overwrite_check in [OverwriteCheck.SIZE_OR_TIME, OverwriteCheck.SIZE]:
+                    src_stat = copy_task.src.stat()
+                    dst_stat = copy_task.dst.stat()
+
+                    if src_stat.st_size != dst_stat.st_size:
+                        logging.debug("Adding copy \"%s\" -> \"%s\" as task: file size %d does not match %d.",
+                                      copy_task.src, copy_task.dst, src_stat.st_size, dst_stat.st_size)
+                        yield copy_task
+                    elif overwrite_check == OverwriteCheck.SIZE_OR_TIME:
+                        if src_stat.st_mtime > dst_stat.st_mtime:
+                            logging.debug("Adding copy \"%s\" -> \"%s\" as task: source was modified more recently.",
+                                          copy_task.src, copy_task.dst)
+                            yield copy_task
+                        else:
+                            logging.debug("Skipping copy \"%s\" -> \"%s\": source was not modified more recently.",
+                                          copy_task.src, copy_task.dst, src_stat.st_size)
+                    else:
+                        logging.debug("Skipping copy \"%s\" -> \"%s\": file sizes (%d) match.",
                                       copy_task.src, copy_task.dst, src_stat.st_size)
                 else:
-                    logging.debug("Skipping copy \"%s\" -> \"%s\": file sizes (%d) match.",
-                                  copy_task.src, copy_task.dst, src_stat.st_size)
-            else:
-                logging.debug("Skipping copy \"%s\" -> \"%s\": destination exists and overwrite check is never.",
+                    logging.debug("Skipping copy \"%s\" -> \"%s\": destination exists and overwrite check is never.",
+                                  copy_task.src, copy_task.dst)
+            elif copy_task.dst not in rename_task_dests:
+                logging.debug("Adding copy \"%s\" -> \"%s\" as task: destination does not exist.",
                               copy_task.src, copy_task.dst)
-        elif copy_task.dst not in rename_task_dests:
-            logging.debug("Adding copy \"%s\" -> \"%s\" as task: destination does not exist.",
-                          copy_task.src, copy_task.dst)
-            yield copy_task
+                yield copy_task
 
 
 def _filter_files_to_delete(dst_root_path: pathlib.Path,
-                            profile: Profile,
                             dot_files_mode: DotFilesMode,
-                            copy_candidates: list[SrcDestPair],
+                            copy_candidates: dict[pathlib.Path, list[SrcDestPair]],
                             rename_tasks: list[SrcDestPair],
-                            dst_files: list[pathlib.Path]) -> tuple[list[pathlib.Path], list[pathlib.Path]]:
-    copy_task_dests = set(pair.dst for pair in copy_candidates)
-    rename_task_srcs = set(pair.src for pair in rename_tasks)
+                            dst_files: dict[pathlib.Path, list[pathlib.Path]]) -> tuple[list[pathlib.Path], list[pathlib.Path]]:
+    copy_task_dests = set(copy_task.dst for copy_task in _iter_copy_candidates(copy_candidates))
+    rename_tasks_by_src = {pair.src: pair.dst for pair in rename_tasks}
 
     files_to_delete = []
     keep_dirs = set()
 
-    for file in dst_files:
+    for file in _iter_destination_files(dst_files):
         if file.name.startswith('.') and not dot_files_mode.should_delete():
-            logging.debug(
-                "Ignoring file \"%s\" for deletion check since deleting dot files is disabled.", file)
+            logging.debug("Ignoring file \"%s\" for deletion since deleting dot files is disabled.", file)
             keep_dirs.update(_list_dirs_from_path(file.parent, dst_root_path))
             continue
 
         if file.suffix == SHA1_EXT:
             hashed_file = file.with_name(file.stem)
-            if not hashed_file.exists() or hashed_file in files_to_delete:
-                logging.debug("Adding file \"%s\" to delete tasks as it's an orphaned SHA1 hash file.", file)
+            if not hashed_file.exists():
+                logging.debug("Marking file \"%s\" for deletion since it's an orphaned SHA1 hash file.", file)
+                files_to_delete.append(file)
+            elif hashed_file in files_to_delete:
+                logging.debug("Marking file \"%s\" for deletion since \"%s\" is marked for deletion.",
+                              file, hashed_file.name)
                 files_to_delete.append(file)
             else:
+                # mark to keep the directory if we're not renaming the hashed file out of our directory
+                rename_dst = rename_tasks_by_src.get(hashed_file)
+                if rename_dst is None or rename_dst.parent == hashed_file.parent:
+                    logging.debug("Marking dir \"%s\" to keep since file \"%s\" is not marked for deletion.",
+                                  hashed_file.parent, file.name)
+                    keep_dirs.update(_list_dirs_from_path(file.parent, dst_root_path))
+            continue
+
+        rename_dst = rename_tasks_by_src.get(file)
+        if rename_dst is not None:
+            # mark to keep the directory if we're not renaming the file out of our directory
+            if file.parent == rename_dst.parent:
+                logging.debug("Marking dir \"%s\" to keep since file \"%s\" is being renamed but staying in this directory.",
+                              file.parent, file.name)
                 keep_dirs.update(_list_dirs_from_path(file.parent, dst_root_path))
-            continue
-
-        if not profile.is_include_for_delete(file):
-            logging.debug(
-                "Ignoring file \"%s\" for deletion checks since it's not an interested extension or explicitly excluded.", file)
-            keep_dirs.update(_list_dirs_from_path(file.parent, dst_root_path))
-            continue
-
-        if file not in rename_task_srcs and file not in copy_task_dests:
-            logging.debug("Adding file \"%s\" to delete tasks as it does not exist in a source rom folder.", file)
+            else:
+                logging.debug("Marking dir \"%s\" to keep since file \"%s\" is being renamed into this directory.",
+                              rename_dst.parent, file.name)
+                keep_dirs.update(_list_dirs_from_path(rename_dst.parent, dst_root_path))
+        elif file not in copy_task_dests:
+            logging.debug("Marking file \"%s\" for deletion as it does not exist in a source rom folder.", file)
             files_to_delete.append(file)
         else:
+            logging.debug("Marking dir \"%s\" to keep since file \"%s\" is not marked for deletion.",
+                          file.parent, file.name)
             keep_dirs.update(_list_dirs_from_path(file.parent, dst_root_path))
 
     dirs_to_delete = set()
@@ -336,11 +396,32 @@ def _filter_files_to_delete(dst_root_path: pathlib.Path,
         for dir in _list_dirs_from_path(file.parent, dst_root_path):
             if dir not in keep_dirs:
                 logging.debug(
-                    "Adding directory \"%s\" to delete tasks as all it's children are marked for deletion.", dir)
+                    "Marking directory \"%s\" for deletion as all it's children are marked for deletion or rename.", dir)
                 dirs_to_delete.add(dst_root_path / dir)
+
+    # check for dirs we shouldn't keep because all their files have been renamed out of the dir
+    for src, dst in rename_tasks_by_src.items():
+        if src.parent != dst.parent:
+            for dir in _list_dirs_from_path(src.parent, dst_root_path):
+                if dir not in keep_dirs:
+                    logging.debug(
+                        "Marking directory \"%s\" for deletion as all it's children are marked for deletion or rename.", dir)
+                    dirs_to_delete.add(dst_root_path / dir)
 
     # reverse sorting the dirs ends up listing the long paths first which allows us to delete subdirs first
     return (files_to_delete, sorted(dirs_to_delete, reverse=True))
+
+
+def _iter_copy_candidates(copy_candidates: dict[pathlib.Path, list[SrcDestPair]]) -> Generator[SrcDestPair, None, None]:
+    for copy_tasks in copy_candidates.values():
+        for copy_task in copy_tasks:
+            yield copy_task
+
+
+def _iter_destination_files(destination_files: dict[pathlib.Path, list[pathlib.Path]]) -> Generator[pathlib.Path, None, None]:
+    for files in destination_files.values():
+        for file in files:
+            yield file
 
 
 def _list_dirs_from_path(path: pathlib.Path, from_dir: pathlib.Path) -> Generator[pathlib.Path, None, None]:

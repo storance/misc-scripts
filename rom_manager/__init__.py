@@ -1,10 +1,12 @@
-from .pattern import Pattern, PatternType
-from .metadata import Metadata, RomSet, get_metadata_file_path, get_profile_file_path, get_dat_file_path
-from .profiles import Profile, ProfileRomSetConfig, FolderPerGameConfig, GameNameExtractorConfig
-from .common import ParseError, Location, normalize_unicode, replace_suffix, replace_stem, get_stem, generate_random_string
-from .file_util import sha1_hash_file, is_sha1_cached, remove_sha1_cache, rename_file, copy_file, delete_quietly, SHA1_EXT
-from .dat import DatFile, Header, Game, Rom, load_rom_dat
-from .cue import list_bin_files_from_cue, rename_bin_files_in_cue
+from .pattern import *
+from .metadata import *
+from .profiles import *
+from .common import *
+from .file_util import *
+from .dat import *
+from .cue import * 
+from .rom import *
+from .regions import *
 
 __all__ = [
     "Pattern",
@@ -12,15 +14,22 @@ __all__ = [
     "Metadata",
     "RomSet",
     "Profile",
-    "ProfileRomSetConfig",
-    "FolderPerGameConfig",
-    "GameNameExtractorConfig",
+    "ProfileOutput",
+    "ProfileOutput",
+    "GroupType",
+    "GroupingConfig",
+    "GroupByPrefixConfig",
+    "GroupByGameConfig",
+    "GroupByLangConfig",
+    "GroupByRegionConfig",
+    "MultiRegionMode",
     "ParseError",
     "Location",
     "DatFile",
-    "Header",
-    "Game",
-    "Rom",
+    "DatHeader",
+    "DatGame",
+    "DatRom",
+    "RomFile",
     "get_metadata_file_path",
     "get_profile_file_path",
     "get_dat_file_path",
