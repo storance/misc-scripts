@@ -274,8 +274,10 @@ def _filter_copy_tasks(copy_candidates: dict[pathlib.Path, list[SrcDestPair]],
                        hashes_by_path: dict[pathlib.Path, str]) -> Generator[SrcDestPair, None, None]:
     """
         Filter out copy task candidates that don't need to be run because they are either
-        1). Part of the rename tasks
-        2). The destination already exists and has not been modified
+        <ol>
+        <li>Part of the rename tasks</li>
+        <li>The destination already exists and has not been modified</li>
+        </ol>
     """
 
     # build the set of destination paths for the rename tasks
@@ -337,6 +339,16 @@ def _filter_files_to_delete(dst_root_path: pathlib.Path,
                             copy_candidates: dict[pathlib.Path, list[SrcDestPair]],
                             rename_tasks: list[SrcDestPair],
                             dst_files: dict[pathlib.Path, list[pathlib.Path]]) -> tuple[list[pathlib.Path], list[pathlib.Path]]:
+    """
+        Finds file to delete in the destination directory by looking at the destination file scan 
+        and finding files that:
+        <ol>
+        <li>Are not in the set of files to copy over</li>
+        <li>Are not in the set of files to be renamed</li>
+        </ol>
+
+        Any directories that has all it's files deleted will also be marked for deletion.
+    """
     copy_task_dests = set(copy_task.dst for copy_task in _iter_copy_candidates(copy_candidates))
     rename_tasks_by_src = {pair.src: pair.dst for pair in rename_tasks}
 
