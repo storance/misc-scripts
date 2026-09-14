@@ -351,7 +351,8 @@ def _filter_files_to_delete(dst_root_path: pathlib.Path,
                 keep_dirs.update(_list_dirs_from_path(file.parent, dst_root_path))
                 continue
 
-            if profile_output.is_delete_excluded(file.relative_to(dst_root_path)):
+            relative_path = file.relative_to(dst_root_path)
+            if profile_output.is_delete_excluded(relative_path) or profile.is_delete_excluded(relative_path):
                 logging.debug("Ignoring file \"%s\" for deletion since it's explicitly excluded.", file)
                 keep_dirs.update(_list_dirs_from_path(file.parent, dst_root_path))
                 continue

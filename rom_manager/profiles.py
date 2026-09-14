@@ -13,10 +13,11 @@ from .regions import Region, lookup_region
 @dataclass
 class Profile:
     outputs: list[ProfileOutput]
+    delete_excludes: list[Pattern]
     outputs_by_path: dict[pathlib.Path, ProfileOutput] = field(init=False)
 
     def __post_init__(self):
-        self.outputs_by_path = {o.path : o for o in self.outputs}
+        self.outputs_by_path = {o.path: o for o in self.outputs}
 
     @classmethod
     def load_from_file(cls, file: pathlib.Path, metadata: Metadata) -> Profile:
@@ -30,11 +31,18 @@ class Profile:
     def from_yaml(yaml_value: Any, location: Location, metadata: Metadata) -> Profile:
         validate_type(yaml_value, YamlType.MAPPING, location)
 
-        folders, folders_loc = extract_key_and_location(yaml_value, 'outputs', location,
+        outputs, outputs_loc = extract_key_and_location(yaml_value, 'outputs', location,
                                                         required=True,
                                                         expected_types=YamlType.SEQ)
+        delete_excludes, delete_excludes_loc = extract_key_and_location(
+            yaml_value, 'delete_excludes', location, default=[], expected_types=YamlType.SEQ)
 
-        return Profile(ProfileOutput.from_yaml_list(folders, folders_loc, metadata))
+        return Profile(
+            ProfileOutput.from_yaml_list(outputs, outputs_loc, metadata),
+            Pattern.from_yaml_list(delete_excludes, delete_excludes_loc))
+
+    def is_delete_excluded(self, relative_path: pathlib.Path) -> bool:
+        return any(exclude.matches(relative_path) for exclude in self.delete_excludes)
 
 
 @dataclass
