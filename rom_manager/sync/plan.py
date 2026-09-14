@@ -53,6 +53,7 @@ def create_plan(progress_tracker: SyncProgressTracker,
     if delete:
         delete_file_tasks, delete_dir_tasks = _filter_files_to_delete(dst_path,
                                                                       dot_files_mode,
+                                                                      profile,
                                                                       copy_candidates_by_folder,
                                                                       rename_tasks,
                                                                       destination_files)
@@ -173,14 +174,7 @@ def _scan_destination(dst_path: pathlib.Path,
     results = []
     for root_path, _, filenames in scan_dir.walk():
         for file in filenames:
-            full_path = root_path / file
-            relative_path = full_path.relative_to(scan_dir)
-
-            if not output.is_delete_excluded(relative_path):
-                results.append(root_path / file)
-            else:
-                logging.debug("Skipping \"%s\" in the output directory since it's explicitly excluded from deletion.",
-                              full_path)
+            results.append(root_path / file)
     return sorted(results)
 
 
@@ -339,6 +333,7 @@ def _filter_copy_tasks(copy_candidates: dict[pathlib.Path, list[SrcDestPair]],
 
 def _filter_files_to_delete(dst_root_path: pathlib.Path,
                             dot_files_mode: DotFilesMode,
+                            profile: Profile,
                             copy_candidates: dict[pathlib.Path, list[SrcDestPair]],
                             rename_tasks: list[SrcDestPair],
                             dst_files: dict[pathlib.Path, list[pathlib.Path]]) -> tuple[list[pathlib.Path], list[pathlib.Path]]:
@@ -348,48 +343,53 @@ def _filter_files_to_delete(dst_root_path: pathlib.Path,
     files_to_delete = []
     keep_dirs = set()
 
-    for file in _iter_destination_files(dst_files):
-        if file.name.startswith('.') and not dot_files_mode.should_delete():
-            logging.debug("Ignoring file \"%s\" for deletion since deleting dot files is disabled.", file)
-            keep_dirs.update(_list_dirs_from_path(file.parent, dst_root_path))
-            continue
+    for folder, files in dst_files.items():
+        profile_output = profile.outputs_by_path[folder]
+        for file in files:
+            if file.name.startswith('.') and not dot_files_mode.should_delete():
+                logging.debug("Ignoring file \"%s\" for deletion since deleting dot files is disabled.", file)
+                keep_dirs.update(_list_dirs_from_path(file.parent, dst_root_path))
+                continue
 
-        if file.suffix == SHA1_EXT:
-            hashed_file = file.with_name(file.stem)
-            if not hashed_file.exists():
-                logging.debug("Marking file \"%s\" for deletion since it's an orphaned SHA1 hash file.", file)
-                files_to_delete.append(file)
-            elif hashed_file in files_to_delete:
-                logging.debug("Marking file \"%s\" for deletion since \"%s\" is marked for deletion.",
-                              file, hashed_file.name)
+            if profile_output.is_delete_excluded(file.relative_to(dst_root_path)):
+                logging.debug("Ignoring file \"%s\" for deletion since it's explicitly excluded.", file)
+                keep_dirs.update(_list_dirs_from_path(file.parent, dst_root_path))
+                continue
+
+            if file.suffix == SHA1_EXT:
+                hashed_file = file.with_name(file.stem)
+                if not hashed_file.exists():
+                    logging.debug("Marking file \"%s\" for deletion since it's an orphaned SHA1 hash file.", file)
+                    files_to_delete.append(file)
+                elif hashed_file in files_to_delete:
+                    logging.debug("Marking file \"%s\" for deletion since \"%s\" is marked for deletion.",
+                                  file, hashed_file.name)
+                    files_to_delete.append(file)
+                else:
+                    rename_dst = rename_tasks_by_src.get(hashed_file)
+                    if rename_dst is None or rename_dst.parent == hashed_file.parent:
+                        logging.debug("Marking dir \"%s\" to keep since file \"%s\" is not marked for deletion.",
+                                      hashed_file.parent, file.name)
+                        keep_dirs.update(_list_dirs_from_path(file.parent, dst_root_path))
+                continue
+
+            rename_dst = rename_tasks_by_src.get(file)
+            if rename_dst is not None:
+                if file.parent == rename_dst.parent:
+                    logging.debug("Marking dir \"%s\" to keep since file \"%s\" is being renamed but staying in this directory.",
+                                  file.parent, file.name)
+                    keep_dirs.update(_list_dirs_from_path(file.parent, dst_root_path))
+                else:
+                    logging.debug("Marking dir \"%s\" to keep since file \"%s\" is being renamed into this directory.",
+                                  rename_dst.parent, file.name)
+                    keep_dirs.update(_list_dirs_from_path(rename_dst.parent, dst_root_path))
+            elif file not in copy_task_dests:
+                logging.debug("Marking file \"%s\" for deletion as it does not exist in a source rom folder.", file)
                 files_to_delete.append(file)
             else:
-                # mark to keep the directory if we're not renaming the hashed file out of our directory
-                rename_dst = rename_tasks_by_src.get(hashed_file)
-                if rename_dst is None or rename_dst.parent == hashed_file.parent:
-                    logging.debug("Marking dir \"%s\" to keep since file \"%s\" is not marked for deletion.",
-                                  hashed_file.parent, file.name)
-                    keep_dirs.update(_list_dirs_from_path(file.parent, dst_root_path))
-            continue
-
-        rename_dst = rename_tasks_by_src.get(file)
-        if rename_dst is not None:
-            # mark to keep the directory if we're not renaming the file out of our directory
-            if file.parent == rename_dst.parent:
-                logging.debug("Marking dir \"%s\" to keep since file \"%s\" is being renamed but staying in this directory.",
+                logging.debug("Marking dir \"%s\" to keep since file \"%s\" is not marked for deletion.",
                               file.parent, file.name)
                 keep_dirs.update(_list_dirs_from_path(file.parent, dst_root_path))
-            else:
-                logging.debug("Marking dir \"%s\" to keep since file \"%s\" is being renamed into this directory.",
-                              rename_dst.parent, file.name)
-                keep_dirs.update(_list_dirs_from_path(rename_dst.parent, dst_root_path))
-        elif file not in copy_task_dests:
-            logging.debug("Marking file \"%s\" for deletion as it does not exist in a source rom folder.", file)
-            files_to_delete.append(file)
-        else:
-            logging.debug("Marking dir \"%s\" to keep since file \"%s\" is not marked for deletion.",
-                          file.parent, file.name)
-            keep_dirs.update(_list_dirs_from_path(file.parent, dst_root_path))
 
     dirs_to_delete = set()
     for file in files_to_delete:

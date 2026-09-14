@@ -28,12 +28,14 @@ class RomFile:
 
         title = match.group(1)
         if match.group(2) is not None:
-            raw_regions = match.group(2).split(',')
+            raw_regions = [region.strip() for region in match.group(2).split(',')]
             regions = set()
             for region_name in raw_regions:
-                region = lookup_region(region_name.strip()) 
+                region = lookup_region(region_name) 
                 if region is not None:
                     regions.add(region)
+                else:
+                    regions.add(UNKNOWN_REGION)
         else:
             raw_regions = []
             regions = {UNKNOWN_REGION}
@@ -59,8 +61,8 @@ class RomFile:
         if include_regions and self.raw_regions:
             name = f"{name} ({', '.join(self.raw_regions)})"
 
-        if include_langs and self.langs:
-            name = f"{name} ({', '.join(self.langs)})"
+        if include_langs and self.raw_langs:
+            name = f"{name} ({','.join(self.raw_langs)})"
 
         return name
 

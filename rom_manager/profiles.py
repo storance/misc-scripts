@@ -13,6 +13,10 @@ from .regions import Region, lookup_region
 @dataclass
 class Profile:
     outputs: list[ProfileOutput]
+    outputs_by_path: dict[pathlib.Path, ProfileOutput] = field(init=False)
+
+    def __post_init__(self):
+        self.outputs_by_path = {o.path : o for o in self.outputs}
 
     @classmethod
     def load_from_file(cls, file: pathlib.Path, metadata: Metadata) -> Profile:
