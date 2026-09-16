@@ -24,7 +24,7 @@ class RomFile:
         name = get_stem(file)
         match = _NAME_PARSER.match(name)
         if match is None:
-            raise ValueError(f"Could not parse the game \"{name}\"")
+            return RomFile(file, name, [], {UNKNOWN_REGION}, [], set())
 
         title = match.group(1)
         if match.group(2) is not None:
@@ -42,7 +42,7 @@ class RomFile:
 
         if match.group(3) is not None:
             raw_langs = [lang.strip() for lang in match.group(3).split(',')]
-            if not all(_is_valid_lang(lang) for lang in raw_langs):
+            if not all(is_valid_lang(lang) for lang in raw_langs):
                 langs = set()
             else:
                 langs = set(raw_langs)
@@ -66,7 +66,7 @@ class RomFile:
 
         return name
 
-def _is_valid_lang(lang_code:str) -> bool:
+def is_valid_lang(lang_code:str) -> bool:
     return len(lang_code) == 2 \
         and lang_code[0].isupper() \
         and lang_code[1].islower() \

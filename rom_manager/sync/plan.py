@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from .common import HashFileSource, OverwriteCheck, DotFilesMode, SrcDestPair
 from .grouping import Grouping, create_groupers
 from .progress import SyncProgressTracker
-from .. import Profile, ProfileOutput, ProfileSource, sha1_hash_file, SHA1_EXT
+from .. import Profile, ProfileOutput, ProfileSource, RomFile, sha1_hash_file, SHA1_EXT
 
 __all__ = ['Plan', 'SrcDestPair', 'DotFilesMode', 'create_plan']
 
@@ -74,32 +74,46 @@ def _scan_sources(src_path: pathlib.Path,
         src_dst_pairs[output.path] = []
 
         grouper = create_groupers(output.grouping) if output.grouping else None
-        results = []
+        results: list[SourceEntry] = []
         for source in output.sources:
             _scan_profile_source(src_path, source, dot_files_mode, results)
 
-        results = _filter_duplicate_entries(results)
+        results = _filter_duplicate_entries(src_path, results)
 
         folder_dst_path = dst_path / output.path
         if grouper:
-            for group in grouper.create_group(src_path, results):
+            for group in grouper.create_group(src_path, [src.full_path for src in results]):
                 if isinstance(group, Grouping):
                     src_dst_pairs[output.path].extend(group.to_src_dst_pairs(folder_dst_path))
                 else:
                     src_dst_pairs[output.path].append(SrcDestPair(group, folder_dst_path / group.name))
         else:
-            for result in results:
-                src_dst_pairs[output.path].append(SrcDestPair(result, folder_dst_path / result.name))
+            src_dst_pairs[output.path].extend(
+                SrcDestPair(src.full_path, src.to_dst_path(folder_dst_path, output.flatten))
+                for src in results
+            )
 
         src_dst_pairs[output.path] = sorted(src_dst_pairs[output.path], key=lambda p: p.src.name)
 
     return src_dst_pairs
 
 
+@dataclass
+class SourceEntry:
+    full_path: pathlib.Path
+    relative_path: pathlib.Path
+
+    def to_dst_path(self, dst_root_path: pathlib.Path, flatten: bool) -> pathlib.Path:
+        if flatten:
+            return dst_root_path / self.full_path.name
+        else:
+            return dst_root_path / self.relative_path
+
+
 def _scan_profile_source(src_path: pathlib.Path,
                          source: ProfileSource,
                          dot_files_mode: DotFilesMode,
-                         results: list[pathlib.Path]):
+                         results: list[SourceEntry]):
     scan_dir = src_path / source.rom_set.path
     logging.debug("Scanning rom set \"%s\" in folder \"%s\" for roms with extensions: %s",
                   scan_dir,
@@ -111,11 +125,12 @@ def _scan_profile_source(src_path: pathlib.Path,
 
     glob_pattern = "**" if source.rom_set.recursive else "*"
     for file in scan_dir.glob(glob_pattern):
-        relative_path = file.relative_to(scan_dir)
         if not file.is_file():
             continue
 
-        if not source.rom_set.is_included(file):
+        relative_path = file.relative_to(scan_dir)
+        rom_file = RomFile.parse_from_name(relative_path)
+        if not source.rom_set.is_included(rom_file):
             logging.debug("Skipping file \"%s\" in rom set \"%s\" as it does not end with a desired extension.",
                           relative_path, source.rom_set.name)
             continue
@@ -125,32 +140,32 @@ def _scan_profile_source(src_path: pathlib.Path,
                           relative_path, source.rom_set.name)
             continue
 
-        relative_path = file.relative_to(scan_dir)
-        if source.rom_set.is_excluded(relative_path):
+        if source.rom_set.is_excluded(rom_file):
             logging.debug("Skipping file \"%s\" in rom set \"%s\" as it matches the exclude pattern of the rom set.",
                           relative_path, source.rom_set.name)
             continue
 
-        if source.is_excluded(relative_path):
+        if source.is_excluded(rom_file):
             logging.debug("Skipping file \"%s\" in rom set \"%s\" as it matches an exclude pattern of the profile source.",
                           relative_path, source.rom_set.name)
             continue
 
-        if not source.is_included(relative_path):
+        if not source.is_included(rom_file):
             logging.debug("Skipping file \"%s\" in rom set \"%s\" as does not match any include pattern of the profile source.",
                           relative_path, source.rom_set.name)
             continue
 
         logging.debug("Found \"%s\" from scanning rom set \"%s\"", file, source.rom_set.name)
-        results.append(file)
+        results.append(SourceEntry(file, file.relative_to(scan_dir)))
 
 
-def _filter_duplicate_entries(files: list[pathlib.Path]) -> list[pathlib.Path]:
+def _filter_duplicate_entries(src_path: pathlib.Path, files: list[SourceEntry]) -> list[SourceEntry]:
     unique_names = set()
     results = []
     for file in files:
-        if file.name not in unique_names:
-            unique_names.add(file.name)
+        relative_path = file.full_path.relative_to(src_path)
+        if relative_path not in unique_names:
+            unique_names.add(relative_path)
             results.append(file)
         else:
             logging.debug('Skipping \"%s\" since it was duplicated by another rom set', file)

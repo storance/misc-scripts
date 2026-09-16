@@ -3,11 +3,12 @@ from enum import StrEnum
 from ruamel.yaml import YAML
 from dataclasses import dataclass, field
 from typing import Any
-from .pattern import Pattern
+from .pattern import Pattern, Filter
 from .common import ParseError, Location, YamlType, extract_key, extract_key_and_location, \
     enumerate_seq, enumerate_mapping, validate_type
 from .metadata import Metadata, RomSet
 from .regions import Region, lookup_region
+from .rom import RomFile
 
 
 @dataclass
@@ -49,6 +50,7 @@ class Profile:
 class ProfileOutput:
     path: pathlib.Path
     grouping: GroupingConfig | None
+    flatten: bool
     sources: list[ProfileSource]
     delete_excludes: list[Pattern]
 
@@ -56,27 +58,27 @@ class ProfileOutput:
     def from_yaml(yaml_value: Any, location: Location, metadata: Metadata) -> ProfileOutput:
         validate_type(yaml_value, YamlType.MAPPING, location)
 
-        if 'sources' in yaml_value and 'source' in yaml_value:
-            raise ParseError('Both "sources" and "source" can not be both specified.', location)
-
         path = extract_key(yaml_value, 'path', location, required=True, expected_types=YamlType.STRING)
         grouping, grouping_loc = extract_key_and_location(
             yaml_value, 'grouping', location, expected_types=YamlType.MAPPING)
-        source, source_loc = extract_key_and_location(yaml_value, 'source', location, expected_types=YamlType.STRING)
-        if source is not None:
-            profile_sources = [ProfileSource.from_yaml(source, source_loc, metadata)]
-        else:
-            sources, sources_loc = extract_key_and_location(yaml_value, 'sources', location,
-                                                            required=True,
-                                                            expected_types=YamlType.SEQ)
-            profile_sources = ProfileSource.from_yaml_list(sources, sources_loc, metadata)
+        flatten = extract_key(yaml_value, 'flatten', location,
+                              default=False,
+                              expected_types=YamlType.BOOL)
+        sources, sources_loc = extract_key_and_location(yaml_value, 'sources', location,
+                                                        required=True,
+                                                        expected_types=[YamlType.STRING, YamlType.SEQ])
         delete_excludes, delete_excludes_loc = extract_key_and_location(
             yaml_value, 'delete_excludes', location, default=[], expected_types=YamlType.SEQ)
 
+        grouping_config = GroupingConfig.from_yaml(grouping, grouping_loc)
+        if grouping_config.is_enabled():
+            flatten = True
+
         return ProfileOutput(
             pathlib.Path(path),
-            GroupingConfig.from_yaml(grouping, grouping_loc),
-            profile_sources,
+            grouping_config,
+            flatten,
+            ProfileSource.from_yaml_list(sources, sources_loc, metadata),
             Pattern.from_yaml_list(delete_excludes, delete_excludes_loc)
         )
 
@@ -103,8 +105,8 @@ class ProfileOutput:
 @dataclass(frozen=True)
 class ProfileSource:
     rom_set: RomSet
-    includes: list[Pattern] = field(default_factory=list)
-    excludes: list[Pattern] = field(default_factory=list)
+    includes: Filter = field(default_factory=Filter)
+    excludes: Filter = field(default_factory=Filter)
 
     @staticmethod
     def from_yaml(yaml_value: Any,
@@ -127,28 +129,29 @@ class ProfileSource:
             raise ParseError(f"Rom set \"{yaml_value}\" does not exist in the metadata.yml", rom_set_loc)
 
         includes, includes_loc = extract_key_and_location(yaml_value, 'includes', location,
-                                                          default=[],
-                                                          expected_types=YamlType.SEQ)
+                                                          default={},
+                                                          expected_types=YamlType.MAPPING)
         excludes, excludes_loc = extract_key_and_location(yaml_value, 'excludes', location,
-                                                          default=[],
-                                                          expected_types=YamlType.SEQ)
+                                                          default={},
+                                                          expected_types=YamlType.MAPPING)
 
         return ProfileSource(rom_set,
-                             Pattern.from_yaml_list(includes, includes_loc),
-                             Pattern.from_yaml_list(excludes, excludes_loc))
+                             Filter.from_yaml(includes, includes_loc),
+                             Filter.from_yaml(excludes, excludes_loc))
 
     @classmethod
-    def from_yaml_list(cls, yaml_values: list[Any], location: Location, metadata: Metadata) -> list[ProfileSource]:
+    def from_yaml_list(cls, yaml_values: Any, location: Location, metadata: Metadata) -> list[ProfileSource]:
+        validate_type(yaml_values, [YamlType.SEQ, YamlType.STRING], location)
+
+        if isinstance(yaml_values, str):
+            return [ProfileSource.from_yaml(yaml_values, location, metadata)]
         return [cls.from_yaml(value, loc, metadata) for value, loc in enumerate_seq(yaml_values, location)]
 
-    def is_excluded(self, relative_path: pathlib.Path) -> bool:
-        return any(exclude.matches(relative_path) for exclude in self.excludes)
+    def is_excluded(self, rom_file: RomFile) -> bool:
+        return self.excludes.match_any(rom_file)
 
-    def is_included(self, relative_path: pathlib.Path) -> bool:
-        if not self.includes:
-            return True
-
-        return any(include.matches(relative_path) for include in self.includes)
+    def is_included(self, rom_file: RomFile) -> bool:
+        return self.includes.match_all(rom_file)
 
 
 class GroupType(StrEnum):

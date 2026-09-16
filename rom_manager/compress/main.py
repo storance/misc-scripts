@@ -17,6 +17,7 @@ from .. import Metadata, RomSet, ParseError, replace_suffix, get_metadata_file_p
 
 CD_SIZE_LIMIT = 800 * 1024 * 1024
 
+
 class CompressionFormat(StrEnum):
     CHD = 'chd'
     CSO = 'cso'
@@ -94,7 +95,8 @@ def configure_compress_parser(parser: argparse.ArgumentParser):
                         nargs="+",
                         required=True,
                         help='Rom sets to compress in the format of input_rom_set[:output_rom_set].' +
-                        'If the output rom set is not specified, it will be auto-discovered based on the input rom set\'s group and the format\'s extension.')
+                        'If the output rom set is not specified, it will be auto-discovered based on the input rom set\'s group and the format\'s extension. ' +
+                        'Note: Include and excludes are ignored on the rom sets.')
     parser.add_argument('input_directory',
                         type=pathlib.Path,
                         help='Directory containing ISO and BIN/CUE files to compress')
@@ -327,7 +329,7 @@ def _execute_process(input_file: pathlib.Path, args: list[Any], check: bool = Tr
                           stdin=subprocess.PIPE,
                           stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT) as process:
-        for line in process.stdout: # type: ignore we're explicitly using stdout=PIPE
+        for line in process.stdout:  # type: ignore we're explicitly using stdout=PIPE
             clean_line = line.rstrip("\n")
             logger.info(clean_line)
 

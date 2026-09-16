@@ -3,11 +3,14 @@ from ruamel.yaml import YAML
 from dataclasses import dataclass
 from typing import Any
 from .common import ParseError, YamlType, Location, extract_key, extract_key_and_location, enumerate_seq, validate_type
-from .pattern import Pattern
+from .pattern import Filter
+from .regions import lookup_region
+from .rom import RomFile
 
 METADATA_DIR = pathlib.Path(".metadata")
 PROFILES_DIR = METADATA_DIR / "profiles"
 DATS_DIR = METADATA_DIR / "dats"
+
 
 @dataclass
 class Metadata:
@@ -45,11 +48,12 @@ class RomSet:
     group: str | None
     recursive: bool
     extensions: list[str]
-    excludes: list[Pattern]
+    includes: Filter
+    excludes: Filter
     dat_files: list[str]
 
     @staticmethod
-    def from_yaml(yaml_value: dict, location: Location) -> RomSet:
+    def from_yaml(yaml_value: dict, location: Location) -> list[RomSet]:
         path = extract_key(yaml_value, 'path', location,
                            required=True, expected_types=YamlType.STRING)
         name = extract_key(yaml_value, 'name', location,
@@ -60,17 +64,38 @@ class RomSet:
                                 default=False, expected_types=YamlType.BOOL)
         extensions = _parse_extensions(*extract_key_and_location(yaml_value, 'extensions', location,
                                                                  required=True, expected_types=YamlType.SEQ))
-        dat_files = extract_key(yaml_value, 'dat_files', location, default=[], expected_types=YamlType.SEQ)
+        dat_files = extract_key(yaml_value, 'dat_files', location,
+                                default=[],
+                                expected_types=YamlType.SEQ)
+        includes, includes_loc = extract_key_and_location(yaml_value, 'includes', location,
+                                                          default={},
+                                                          expected_types=YamlType.MAPPING)
         excludes, excludes_loc = extract_key_and_location(yaml_value, 'excludes', location,
-                                                          default=[], expected_types=YamlType.SEQ)
+                                                          default={},
+                                                          expected_types=YamlType.MAPPING)
 
-        return RomSet(path,
-                      name,
-                      group,
-                      recursive,
-                      extensions,
-                      Pattern.from_yaml_list(excludes, excludes_loc),
-                      dat_files)
+        regional_sets, regional_sets_loc = extract_key_and_location(yaml_value, 'regional_sets', location,
+                                                                    default=[],
+                                                                    expected_types=YamlType.SEQ)
+
+        include_filter = Filter.from_yaml(includes, includes_loc)
+        exclude_filter = Filter.from_yaml(excludes, excludes_loc)
+        if regional_sets:
+            if include_filter.regions or include_filter.langs:
+                raise ParseError("Regional sets can't be used with includes regions or langs", regional_sets_loc)
+            if exclude_filter.regions or exclude_filter.langs:
+                raise ParseError("Regional sets can't be used with excludes regions or langs", regional_sets_loc)
+
+        rom_sets = [RomSet(path, name, group, recursive, extensions, include_filter, exclude_filter, dat_files)]
+        for region_name, loc in enumerate_seq(regional_sets, regional_sets_loc):
+            region = lookup_region(region_name)
+            if region is None:
+                raise ParseError(f"Unknown or unsupported region \"{name}\".", loc)
+            new_include_filter = Filter(include_filter.patterns, [region], [])
+            rom_sets.append(RomSet(path, f"{name}_{region.name.casefold()}", group, recursive, extensions,
+                            new_include_filter, exclude_filter, dat_files))
+
+        return rom_sets
 
     @staticmethod
     def from_yaml_list(yaml_values: list, location: Location) -> list[RomSet]:
@@ -80,24 +105,26 @@ class RomSet:
         rom_folders = []
 
         for folder_value, folder_loc in enumerate_seq(yaml_values, location):
-            rom_folder = RomSet.from_yaml(folder_value, folder_loc)
+            rom_sets = RomSet.from_yaml(folder_value, folder_loc)
+            for rom_set in rom_sets:
+                if rom_set.name in existing_names:
+                    raise ParseError(
+                        f"A rom folder with the name '{rom_set.name}' was already defined at {existing_names[rom_set.name]}.", folder_loc)
 
-            if rom_folder.name in existing_names:
-                raise ParseError(
-                    f"A rom folder with the name '{rom_folder.name}' was already defined at {existing_names[rom_folder.name]}.", folder_loc)
-
-            existing_names[rom_folder.name] = folder_loc
-            rom_folders.append(rom_folder)
+                existing_names[rom_set.name] = folder_loc
+                rom_folders.append(rom_set)
 
         return rom_folders
 
-    def is_included(self, relative_path: pathlib.Path) -> bool:
-        name = relative_path.name.casefold()
+    def is_included(self, rom_file: RomFile) -> bool:
+        name = rom_file.file.name.casefold()
+        if not any(name.endswith(ext) for ext in self.extensions):
+            return False
 
-        return any(name.endswith(ext) for ext in self.extensions)
+        return self.includes.match_all(rom_file)
 
-    def is_excluded(self, relative_path: pathlib.Path) -> bool:
-        return any(exclude.matches(relative_path) for exclude in self.excludes)
+    def is_excluded(self, rom_file: RomFile) -> bool:
+        return self.excludes.match_any(rom_file)
 
 
 def _parse_extensions(yaml_values: list, location: Location) -> list[str]:
@@ -105,23 +132,25 @@ def _parse_extensions(yaml_values: list, location: Location) -> list[str]:
         raise ParseError("At least one extension must be specified.", location)
 
     exts = []
-
     for ext, ext_loc in enumerate_seq(yaml_values, location):
         if not ext:
             raise ParseError(f"Empty or null extensions are not allowed", ext_loc)
 
         if ext[0] != '.':
-            raise ParseError(f"Extension {ext} does not start with a leading dot (.)", ext_loc)
+            raise ParseError(f"Extension \"{ext}\" does not start with a leading dot (.)", ext_loc)
 
         exts.append(ext.casefold())
 
     return exts
 
+
 def get_metadata_file_path(source_dir: pathlib.Path) -> pathlib.Path:
     return source_dir / METADATA_DIR / "metadata.yml"
 
+
 def get_profile_file_path(source_dir: pathlib.Path, profile_name: str) -> pathlib.Path:
     return source_dir / PROFILES_DIR / pathlib.Path(profile_name).with_suffix('.yml')
+
 
 def get_dat_file_path(source_dir: pathlib.Path, dat_file: str) -> pathlib.Path:
     return source_dir / DATS_DIR / pathlib.Path(dat_file)

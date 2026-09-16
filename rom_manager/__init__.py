@@ -30,6 +30,7 @@ __all__ = [
     "DatGame",
     "DatRom",
     "RomFile",
+    "Filter",
     "get_metadata_file_path",
     "get_profile_file_path",
     "get_dat_file_path",
@@ -47,5 +48,6 @@ __all__ = [
     "SHA1_EXT",
     "load_rom_dat",
     "list_bin_files_from_cue",
-    "rename_bin_files_in_cue"
+    "rename_bin_files_in_cue",
+    "is_valid_lang"
 ]

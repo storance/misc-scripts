@@ -29,14 +29,10 @@ class TargetRomSet:
                     sync_files.append(sync_file)
         return sync_files
 
-    def is_included(self, relative_path: pathlib.Path) -> bool:
-        name = relative_path.name.casefold()
+    def is_included(self, file: pathlib.Path) -> bool:
+        name = file.name.casefold()
 
         return any(name.endswith(ext) for ext in self.scan_extensions)
-
-    def is_excluded(self, relative_path: pathlib.Path) -> bool:
-        return self.primary_rom_set.is_excluded(relative_path)
-    
 
 @dataclass
 class CueFile:

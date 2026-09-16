@@ -3,7 +3,9 @@ import pathlib
 from typing import Any
 from .common import ParseError, Location, YamlType, extract_key, extract_key_and_location, enumerate_seq, validate_type, compile_regex, normalize_unicode
 from enum import StrEnum
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from .regions import Region, lookup_region
+from .rom import RomFile, is_valid_lang
 
 
 class PatternType(StrEnum):
@@ -87,3 +89,62 @@ class Pattern:
             return self.compiled_pattern.match(value) is not None # type: ignore should not be None for REGEX type
 
         raise ValueError(f"Unsupported pattern type \"{self.type}\"")
+
+@dataclass(frozen=True)
+class Filter:
+    patterns: list[Pattern] = field(default_factory=list)
+    regions: list[Region] = field(default_factory=list)
+    langs: list[str] = field(default_factory=list)
+
+    @staticmethod
+    def from_yaml(yaml_value: Any, location: Location) -> Filter:
+        validate_type(yaml_value, YamlType.MAPPING, location)
+
+        patterns, patterns_loc = extract_key_and_location(yaml_value, 'patterns', location,
+                                                          default=[],
+                                                          expected_types=YamlType.SEQ)
+        raw_regions, regions_loc = extract_key_and_location(yaml_value, 'regions', location,
+                                                            default=[],
+                                                            expected_types=YamlType.SEQ)
+        langs, langs_loc = extract_key_and_location(yaml_value, 'langs', location,
+                                                    default=[],
+                                                    expected_types=YamlType.SEQ)
+
+        regions = []
+        for region_name, region_name_loc in enumerate_seq(raw_regions, regions_loc):
+            region = lookup_region(region_name)
+            if region is None:
+                raise ParseError(f"Unrecognized region \"{region_name}\".", region_name_loc)
+
+            regions.append(region)
+
+        for lang, lang_loc in enumerate_seq(langs, langs_loc):
+            if not is_valid_lang(lang):
+                raise ParseError(
+                    f"Unrecognized language \"{lang}\".  Must be a two letter ISO 639 language code where the first letter is uppercase and the second is lowercase.", lang_loc)
+
+        return Filter(
+            Pattern.from_yaml_list(patterns, patterns_loc),
+            regions,
+            langs)
+
+    def is_empty(self) -> bool:
+        return not self.patterns and not self.regions and not self.langs
+
+    def match_any(self, rom_file: RomFile) -> bool:
+        if any(pattern.matches(rom_file.file) for pattern in self.patterns):
+            return True
+
+        if any(region in rom_file.regions for region in self.regions):
+            return True
+
+        return any(lang in rom_file.langs for lang in self.langs)
+
+    def match_all(self, rom_file: RomFile) -> bool:
+        if self.patterns and not any(pattern.matches(rom_file.file) for pattern in self.patterns):
+            return False
+
+        if self.regions and not any(region in rom_file.regions for region in self.regions):
+            return False
+
+        return not self.langs or any(lang in rom_file.langs for lang in self.langs)

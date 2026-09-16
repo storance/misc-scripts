@@ -10,7 +10,7 @@ from .dat import load_dat_files
 from .progress import RenameProgressTracker
 from .tasks import build_rename_tasks
 from .common import CueFile, RenameTarget, TargetRomSet
-from .. import Metadata, ParseError, sha1_hash_file, is_sha1_cached, list_bin_files_from_cue, get_metadata_file_path, get_dat_file_path
+from .. import Metadata, ParseError, RomFile, sha1_hash_file, list_bin_files_from_cue, get_metadata_file_path, get_dat_file_path
 
 
 def configure_rename_parser(parser: argparse.ArgumentParser):
@@ -27,7 +27,10 @@ def configure_rename_parser(parser: argparse.ArgumentParser):
     parser.add_argument('-i', '--ignore-cached-hashes',
                         action="store_true",
                         help='Ignore any cached sha1 hashes and force them to be regenerated.')
-    parser.add_argument('-r', '--rom-sets', nargs="+", required=True, help='The name of the rom sets to rename.')
+    parser.add_argument('-r', '--rom-sets',
+                        nargs="+",
+                        required=True,
+                        help='The name of the rom sets to rename. Note: Include and excludes are ignored on the rom set.')
     parser.add_argument('input_directory',
                         type=pathlib.Path,
                         help='The directory where the roms exist. ' +
@@ -145,15 +148,9 @@ def _scan_for_roms(progress_tracker: RenameProgressTracker,
         glob_pattern = "**" if rom_set.primary_rom_set.recursive else "*"
         scan_dir = input_directory / rom_set.primary_rom_set.path
         for file in scan_dir.glob(glob_pattern):
-            relative_path = file.relative_to(input_directory)
             file_name = file.name.casefold()
-
-            if not rom_set.is_included(relative_path):
+            if not rom_set.is_included(file):
                 logging.debug("Skipping file \"%s\" as it does not end with a desired extension.", file)
-                continue
-
-            if rom_set.is_excluded(relative_path):
-                logging.debug("Skipping file \"%s\" as it matches the exclude pattern of the rom set.", file)
                 continue
 
             sync_files = rom_set.get_files_to_sync(input_directory, file)

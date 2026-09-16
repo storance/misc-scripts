@@ -56,19 +56,32 @@ def extract_location_for_key(mapping: dict, key: str, parent: Location) -> Locat
         if key not in mapping:
             line = parent.line
         else:
-            line = mapping.lc.key(key)[0]+1
+            line = get_key_line_number(mapping, key)
 
         return parent.child_key(key, line)
 
     return parent.child_key(key, None)
 
+def get_key_line_number(node: CommentedMap, key: str) -> int:
+    # Attempt to find the line number using lc.key first
+    try:
+        return node.lc.key(key)[0] + 1
+    except KeyError:
+        pass
+
+    # If not found, check if it was copied via a merge key anchor (<<)
+    for merge_info in node.merge:
+        if key in merge_info:
+            return get_key_line_number(merge_info, key)
+                
+    raise KeyError(f"Key '{key}' not found in this node or any of its merged anchors.")
+
 
 def extract_location_for_index(l: list, idx: int, parent: Location) -> Location:
     if isinstance(l, CommentedSeq):
-        return parent.child_index(idx, l.lc.item(idx)[0]+1)
+        return parent.child_index(idx, l.lc.item(idx)[0] + 1)
 
     return parent.child_index(idx, None)
-
 
 def extract_key(*args, **kwargs) -> Any:
     return extract_key_and_location(*args, **kwargs)[0]
@@ -173,7 +186,7 @@ def validate_type(value: Any, expected_types: YamlType | list[YamlType], locatio
     if actual_type not in expected_types:
         if len(expected_types) == 1:
             raise ParseError(
-                f"Invalid type {actual_type} for {location.field}.  Expected type to {expected_types[0]}.", location)
+                f"Invalid type {actual_type} for {location.field}.  Expected type to be {expected_types[0]}.", location)
         else:
             raise ParseError(
                 f"Invalid type {actual_type} for {location.field}.  Expected type to be one of: {', '.join(expected_types)}.", location)
