@@ -29,9 +29,9 @@ class SyncProgressTracker:
         yield self.hash_overall_progress.progress
         yield self.hash_files_progress
 
-        yield self.delete_overall_progress.progress
-
         yield self.rename_overall_progress.progress
+
+        yield self.delete_overall_progress.progress
 
         yield self.copy_overall_progress.progress
         yield self.copy_files_progress

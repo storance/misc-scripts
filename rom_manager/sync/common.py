@@ -1,4 +1,6 @@
+import pathlib
 from enum import StrEnum
+from dataclasses import dataclass
 
 class HashFileSource(StrEnum):
     SOURCE_FILE = 'src'
@@ -24,3 +26,8 @@ class DotFilesMode(StrEnum):
 
     def should_copy(self):
         return self == DotFilesMode.SYNC_BOTH or self == DotFilesMode.SYNC_SRC
+
+@dataclass(frozen=True)
+class SrcDestPair:
+    src: pathlib.Path
+    dst: pathlib.Path

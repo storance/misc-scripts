@@ -2,12 +2,12 @@ import pathlib
 import logging
 import sys
 from dataclasses import dataclass
-from .. import load_rom_dat, Game, Rom
+from .. import load_rom_dat, RomFile, DatRom
 
 @dataclass(frozen=True)
 class GameRomPair:
-    game: Game
-    rom: Rom
+    game: RomFile
+    rom: DatRom
 
 
 def load_dat_files(dat_files: list[pathlib.Path]) -> dict[str, list[GameRomPair]]:

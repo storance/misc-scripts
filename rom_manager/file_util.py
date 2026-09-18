@@ -80,6 +80,7 @@ def _read_sha1_file(file: pathlib.Path) -> str|None:
 
 def rename_file(old: pathlib.Path, new: pathlib.Path):
     """Rename file that is aware of the cached sha1 files and will rename those files as well. """
+    new.parent.mkdir(exist_ok=True)
     old.rename(new)
 
     sha1_old = old.with_name(old.name + SHA1_EXT)
