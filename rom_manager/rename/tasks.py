@@ -3,7 +3,7 @@ import logging
 
 from .common import RenameTarget
 from .dat import GameRomPair
-from .. import RomFile, DatRom, rename_file, replace_stem, get_stem, rename_bin_files_in_cue
+from .. import RomFile, DatGame, DatRom, rename_file, replace_stem, get_stem, rename_bin_files_in_cue
 
 
 class RenameTask:
@@ -131,6 +131,13 @@ def _build_single_rename_task(input_directory: pathlib.Path,
         return None
 
     new_name = file.with_name(rom.name)
+    new_name_rel_path = new_name.relative_to(input_directory)
+    new_rom_file = RomFile.parse_from_name(new_name_rel_path)
+    if not rename_target.source.is_included(new_rom_file) or rename_target.source.is_excluded(new_rom_file):
+        logging.debug("Skipping file \"%s\" as it's rename target \"%s\" is not part of the rom set \"%s\".",
+                      file, new_name.name, rename_target.source.name)
+        return None
+
     tasks: list[RenameTask] = [RenameSingleRomTask(file, new_name)]
     for sync_file in rename_target.sync_files:
         new_sync_file = replace_stem(sync_file, get_stem(new_name))
@@ -198,6 +205,13 @@ def _build_cue_rename_task(input_directory: pathlib.Path,
             "Skipping file \"%s\" as it already matches dat file entry and none of it's bin files were renamed.", cue_file.cue_file)
         return None
 
+    new_cue_rel_path = new_cue_file.relative_to(input_directory)
+    cue_rom_file = RomFile.parse_from_name(new_cue_rel_path)
+    if not rename_target.source.is_included(cue_rom_file) or rename_target.source.is_excluded(cue_rom_file):
+        logging.debug("Skipping file \"%s\" as it's rename target \"%s\" is not part of the rom set \"%s\".",
+                      cue_file.cue_file, new_cue_file.name, rename_target.source.name)
+        return None
+
     tasks: list[RenameTask] = [
         RenameCueTask(cue_file.cue_file, new_cue_file, rename_mapping)
     ]
@@ -208,7 +222,7 @@ def _build_cue_rename_task(input_directory: pathlib.Path,
     return tasks
 
 
-def _find_rom(sha1: str, game: RomFile) -> DatRom | None:
+def _find_rom(sha1: str, game: DatGame) -> DatRom | None:
     for rom in game.roms:
         if rom.sha1 == sha1:
             return rom
@@ -216,7 +230,7 @@ def _find_rom(sha1: str, game: RomFile) -> DatRom | None:
     return None
 
 
-def _find_cue_file_rom(game: RomFile) -> DatRom | None:
+def _find_cue_file_rom(game: DatGame) -> DatRom | None:
     for rom in game.roms:
         if rom.name.casefold().endswith('.cue'):
             return rom

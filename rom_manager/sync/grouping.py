@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Sequence
 from .common import SrcDestPair
 from .. import GroupByRegionConfig, GroupByLangConfig, GroupByGameConfig, GroupByPrefixConfig, GroupingConfig, \
-    GroupType, MultiRegionMode, RomFile, WORLD_REGION, EUROPE_REGION, ASIA_REGION
+    GroupType, MultiRegionMode, RomFile, Region, WORLD_REGION, EUROPE_REGION, ASIA_REGION
 
 NON_ALNUM_PATTERN = re.compile('[^a-zA-Z0-9]+')
 
@@ -109,31 +109,37 @@ class GroupByLang(Grouper):
 class GroupByRegion(Grouper):
     def __init__(self, config: GroupByRegionConfig, next_grouper: Grouper):
         super().__init__(next_grouper)
+        logging.debug("world_mode: %s", config.world_mode)
         self.config = config
 
     def get_groups(self, game: RomFile) -> list[str]:
         regions = set()
         for region in game.regions:
-            if region == WORLD_REGION and self.config.world_mode == MultiRegionMode.EXPAND_TO_COUNTRIES:
+            if self._should_expand_region(region):
                 regions.update(region.children)
-            elif region == EUROPE_REGION and self.config.europe_mode == MultiRegionMode.EXPAND_TO_COUNTRIES:
-                regions.update(region.children)
-            elif region == ASIA_REGION and self.config.asia_mode == MultiRegionMode.EXPAND_TO_COUNTRIES:
-                regions.update(region.children)
-            elif self.config.world_mode == MultiRegionMode.COLLAPSE_TO_GROUPED and WORLD_REGION.is_member(region):
-                regions.add(WORLD_REGION)
-            elif self.config.europe_mode == MultiRegionMode.COLLAPSE_TO_GROUPED and EUROPE_REGION.is_member(region):
-                regions.add(EUROPE_REGION)
-            elif self.config.asia_mode == MultiRegionMode.COLLAPSE_TO_GROUPED and ASIA_REGION.is_member(region):
-                regions.add(ASIA_REGION)
             else:
-                regions.add(region)
+                regions.add(self._translate_region(region))
 
         if self.config.single_per_rom:
-            sorted_regions = sorted(game.regions, key=lambda l: self.config.prefer_ranks.get(l, float('inf')))
+            sorted_regions = sorted(regions, key=lambda l: self.config.prefer_ranks.get(l, float('inf')))
             return [sorted_regions[0].display_name(self.config.use_short_names)]
         else:
             return [region.display_name(self.config.use_short_names) for region in regions]
+
+    def _should_expand_region(self, region: Region) -> bool:
+        return (region == WORLD_REGION and self.config.world_mode == MultiRegionMode.EXPAND_TO_COUNTRIES) or \
+            (region == EUROPE_REGION and self.config.europe_mode == MultiRegionMode.EXPAND_TO_COUNTRIES) or \
+            (ASIA_REGION and self.config.asia_mode == MultiRegionMode.EXPAND_TO_COUNTRIES)
+
+    def _translate_region(self, region: Region) -> Region:
+        if self.config.world_mode == MultiRegionMode.COLLAPSE_TO_GROUPED and WORLD_REGION.is_member(region):
+            return WORLD_REGION
+        if self.config.europe_mode == MultiRegionMode.COLLAPSE_TO_GROUPED and EUROPE_REGION.is_member(region):
+            return EUROPE_REGION
+        if self.config.asia_mode == MultiRegionMode.COLLAPSE_TO_GROUPED and ASIA_REGION.is_member(region):
+            return ASIA_REGION
+        
+        return region
 
     def post_process(self, children: list[Grouping | pathlib.Path]) -> list[Grouping | pathlib.Path]:
         if self.config.flatten_single_region and len(children) == 1:

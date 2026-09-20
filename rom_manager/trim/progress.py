@@ -51,6 +51,7 @@ class TrimProgressTracker:
     def progress_group(self) -> Generator[Progress, None, None]:
         yield self.scan_overall_progress.progress
         yield self.trim_overall_progress.progress
+        yield self.copy_files_progress
 
     def stop(self):
         self.scan_overall_progress.progress.stop()

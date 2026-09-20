@@ -51,6 +51,7 @@ class RomSet:
     includes: Filter
     excludes: Filter
     dat_files: list[str]
+    is_regional_set: bool = False
 
     @staticmethod
     def from_yaml(yaml_value: dict, location: Location) -> list[RomSet]:
@@ -93,7 +94,7 @@ class RomSet:
                 raise ParseError(f"Unknown or unsupported region \"{name}\".", loc)
             new_include_filter = Filter(include_filter.patterns, [region], [])
             rom_sets.append(RomSet(path, f"{name}_{region.name.casefold()}", group, recursive, extensions,
-                            new_include_filter, exclude_filter, dat_files))
+                            new_include_filter, exclude_filter, dat_files, True))
 
         return rom_sets
 
@@ -117,11 +118,11 @@ class RomSet:
         return rom_folders
 
     def is_included(self, rom_file: RomFile) -> bool:
-        name = rom_file.file.name.casefold()
-        if not any(name.endswith(ext) for ext in self.extensions):
-            return False
+        return self.is_included_ext(rom_file.file) and self.includes.match_all(rom_file)
 
-        return self.includes.match_all(rom_file)
+    def is_included_ext(self, file: pathlib.Path) -> bool:
+        name = file.name.casefold()
+        return any(name.endswith(ext) for ext in self.extensions)
 
     def is_excluded(self, rom_file: RomFile) -> bool:
         return self.excludes.match_any(rom_file)

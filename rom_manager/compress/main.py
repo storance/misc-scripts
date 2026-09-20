@@ -13,7 +13,7 @@ from rich.console import Console
 from rich.live import Live
 
 from .progress import CompressProgressTracker
-from .. import Metadata, RomSet, ParseError, replace_suffix, get_metadata_file_path
+from .. import Metadata, RomFile, RomSet, ParseError, replace_suffix, get_metadata_file_path
 
 CD_SIZE_LIMIT = 800 * 1024 * 1024
 
@@ -172,15 +172,19 @@ def _get_rom_set_pairs(rom_sets: list[str], metadata: Metadata, format: Compress
 
             group_members = metadata.find_group(input_rom_set.group)
             output_rom_set = None
-            for member in group_members:
-                if format.output_ext() in member.extensions:
-                    output_rom_set = member
-                    break
 
-            if output_rom_set is None:
+            # exclude the automatically created regional rom sets
+            candidates = [m for m in group_members if format.output_ext() in m.extensions and not m.is_regional_set]
+            if len(candidates) > 1:
+                logging.error("Multiple candidate rom sets in group \'%s\" were found containing the extension %s. " +
+                              "Please explicitly choose an output rom set.", input_rom_set.group, format.output_ext())
+                sys.exit(1)
+            elif not candidates:
                 logging.error("No rom set in group \"%s\" contains the output extension %s for format %s.",
                               input_rom_set.group, format.output_ext(), format)
                 sys.exit(1)
+            else:
+                output_rom_set = candidates[0]
         else:
             output_rom_set_name = rom_set_parts[1]
             output_rom_set = metadata.find_rom_set(output_rom_set_name)
@@ -217,12 +221,38 @@ def _scan_files(progress_tracker: CompressProgressTracker,
             if not file.is_file() or file.name[0] == '.':
                 continue
 
+            rel_path = file.relative_to(input_directory)
+            rom_file = RomFile.parse_from_name(rel_path)
+            if not rom_set_pair.input_rom_set.is_included(rom_file):
+                logging.debug("Skipping \"%s\" since it's does not match any include of the rom set \"%s\".",
+                              file, rom_set_pair.input_rom_set.name)
+                continue
+
+            if rom_set_pair.input_rom_set.is_excluded(rom_file):
+                logging.debug("Skipping \"%s\" since it's excluded from the rom set \"%s\".",
+                              file, rom_set_pair.input_rom_set.name)
+                continue
+
             if not _is_supported_extension(file, format):
                 logging.debug("Skipping \"%s\" since it's not a supported extension for format %s.", file, format)
                 continue
 
             output_file = _get_output_filename(file, input_directory, rom_set_pair, format)
             if not output_file.exists():
+                output_rel_path = output_file.relative_to(input_directory)
+                output_rom_file = RomFile.parse_from_name(output_rel_path)
+
+                # check if the output file is not part of the output rom set
+                if not rom_set_pair.output_rom_set.is_included(output_rom_file):
+                    logging.debug("Skipping generating \"%s\" since it's does not match any include of the output rom set \"%s\".",
+                                  output_file, rom_set_pair.output_rom_set.name)
+                    continue
+
+                if rom_set_pair.output_rom_set.is_excluded(output_rom_file):
+                    logging.debug("Skipping generating \"%s\" since it's excluded from the output rom set \"%s\".",
+                                  output_file, rom_set_pair.output_rom_set.name)
+                    continue
+
                 results.append(CompressPair(file, output_file))
             else:
                 logging.debug("Skipping \"%s\" because a compressed version already exists.", file)

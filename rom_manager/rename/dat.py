@@ -2,11 +2,11 @@ import pathlib
 import logging
 import sys
 from dataclasses import dataclass
-from .. import load_rom_dat, RomFile, DatRom
+from .. import load_rom_dat, DatGame, DatRom
 
 @dataclass(frozen=True)
 class GameRomPair:
-    game: RomFile
+    game: DatGame
     rom: DatRom
 
 

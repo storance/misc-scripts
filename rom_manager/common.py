@@ -65,7 +65,9 @@ def extract_location_for_key(mapping: dict, key: str, parent: Location) -> Locat
 def get_key_line_number(node: CommentedMap, key: str) -> int:
     # Attempt to find the line number using lc.key first
     try:
-        return node.lc.key(key)[0] + 1
+        key_entry = node.lc.key(key)
+        if key_entry:
+            return key_entry[0] + 1
     except KeyError:
         pass
 

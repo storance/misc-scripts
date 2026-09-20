@@ -10,7 +10,7 @@ from .dat import load_dat_files
 from .progress import RenameProgressTracker
 from .tasks import build_rename_tasks
 from .common import CueFile, RenameTarget, TargetRomSet
-from .. import Metadata, ParseError, RomFile, sha1_hash_file, list_bin_files_from_cue, get_metadata_file_path, get_dat_file_path
+from .. import Metadata, ParseError, sha1_hash_file, list_bin_files_from_cue, get_metadata_file_path, get_dat_file_path
 
 
 def configure_rename_parser(parser: argparse.ArgumentParser):
@@ -30,7 +30,7 @@ def configure_rename_parser(parser: argparse.ArgumentParser):
     parser.add_argument('-r', '--rom-sets',
                         nargs="+",
                         required=True,
-                        help='The name of the rom sets to rename. Note: Include and excludes are ignored on the rom set.')
+                        help='The name of the rom sets whose files to rename. Note: Includes and excludes are applied to the target name.')
     parser.add_argument('input_directory',
                         type=pathlib.Path,
                         help='The directory where the roms exist. ' +
@@ -160,10 +160,10 @@ def _scan_for_roms(progress_tracker: RenameProgressTracker,
             if file_name.endswith('.cue'):
                 bin_files = [file.parent / name for name in list_bin_files_from_cue(file)]
                 logging.debug("Scan found cue file \"%s\" with %d bin files.", file, len(bin_files))
-                results.append(RenameTarget(CueFile(file, bin_files), sync_files))
+                results.append(RenameTarget(rom_set.primary_rom_set, CueFile(file, bin_files), sync_files))
             else:
                 logging.debug("Scan found rom file \"%s\".", file)
-                results.append(RenameTarget(file, sync_files))
+                results.append(RenameTarget(rom_set.primary_rom_set, file, sync_files))
 
     progress_tracker.complete_scan()
 

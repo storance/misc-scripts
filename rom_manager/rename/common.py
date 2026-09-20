@@ -41,6 +41,7 @@ class CueFile:
 
 @dataclass
 class RenameTarget:
+    source: RomSet
     file: pathlib.Path|CueFile
     sync_files: list[pathlib.Path]
 
